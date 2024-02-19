@@ -24,7 +24,8 @@ SOURCES = \
 	src/vn/xplat/time.c \
 	src/algorithms/madgwick.c \
 	src/algorithms/mahony.c \
-	src/algorithms/ekf.c
+	src/algorithms/ekf.c \
+	src/algorithms/mathTransform.c
 				
 # Set the object file names, with the source directory stripped
 # from the path, and the build path prepended in its place			

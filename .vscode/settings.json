@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "string.h": "c",
+        "orientationdefines.h": "c",
+        "stdbool.h": "c",
+        "madgwick.h": "c",
+        "math.h": "c"
+    }
+}

@@ -5,7 +5,6 @@
 /* Include files needed to use VnSensor. */
 #include "vn/sensors.h"
 
-void asciiAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex);
 void asciiOrBinaryAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex);
 int processErrorReceived(char* errorMessage, VnError errorCode);
 
@@ -126,31 +125,6 @@ int main(void)
 		return processErrorReceived("Error disconnecting from sensor.", error);
 
 	return 0;
-}
-
-void asciiAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex)
-{
-	vec3f ypr;
-	char strConversions[50];
-
-	/* Silence 'unreferenced formal parameters' warning in Visual Studio. */
-	(userData);
-	(runningIndex);
-
-	/* Make sure we have an ASCII packet and not a binary packet. */
-	if (VnUartPacket_type(packet) != PACKETTYPE_ASCII)
-		return;
-
-	/* Make sure we have a VNYPR data packet. */
-	if (VnUartPacket_determineAsciiAsyncType(packet) != VNYPR)
-		return;
-
-	/* We now need to parse out the yaw, pitch, roll data. */
-	VnUartPacket_parseVNYPR(packet, &ypr);
-
-	/* Now print out the yaw, pitch, roll measurements. */
-	str_vec3f(strConversions, ypr);
-	printf("ASCII Async YPR: %s\n", strConversions);
 }
 
 void asciiOrBinaryAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex)
