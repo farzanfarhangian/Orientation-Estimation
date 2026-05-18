@@ -1,8 +1,411 @@
-<head> 
-  <meta http-equiv="refresh" content="1; URL=help/index.html"> 
-</head> 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orientation Estimation — Algorithm Comparison</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;overflow-x:hidden}
+  header{padding:18px 24px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:12px}
+  header h1{font-size:1.15rem;font-weight:600;color:#f0f6fc}
+  header p{font-size:.8rem;color:#8b949e;margin-top:2px}
+  .badge{font-size:.65rem;background:#388bfd22;color:#79c0ff;border:1px solid #388bfd44;padding:2px 8px;border-radius:20px;white-space:nowrap}
 
-<body> 
-  <p>You will be redirected automatically, otherwise please
-  <a href="help/index.html">click here</a>.</p> 
+  #loading{display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:12px;color:#8b949e}
+  .spinner{width:36px;height:36px;border:3px solid #21262d;border-top-color:#388bfd;border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  #main{display:none}
+
+  /* 3 viewers */
+  .viewers{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#21262d}
+  .viewer-wrap{background:#0d1117;display:flex;flex-direction:column}
+  .viewer-label{padding:8px 12px;font-size:.75rem;font-weight:600;text-align:center;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid #21262d}
+  .viewer-label.madg{color:#58a6ff}
+  .viewer-label.maho{color:#3fb950}
+  .viewer-label.ekf {color:#d2a8ff}
+  .viewer-label.gt  {color:#e3b341}
+  canvas.view{width:100%!important;display:block;cursor:grab}
+  canvas.view:active{cursor:grabbing}
+
+  .angles{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid #21262d;font-size:.7rem}
+  .angles-cell{padding:6px 10px;border-right:1px solid #21262d;display:flex;gap:6px;justify-content:center}
+  .angles-cell:last-child{border-right:none}
+  .angle-item{display:flex;flex-direction:column;align-items:center;gap:1px}
+  .angle-item span:first-child{color:#8b949e;font-size:.6rem}
+  .angle-val{font-variant-numeric:tabular-nums;font-size:.75rem}
+
+  /* controls */
+  .controls{display:flex;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #21262d;flex-wrap:wrap}
+  button.ctrl{background:#21262d;border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:5px 14px;cursor:pointer;font-size:.75rem;transition:.15s}
+  button.ctrl:hover{background:#30363d}
+  button.ctrl.active{background:#388bfd22;border-color:#388bfd;color:#79c0ff}
+  .speed-label{font-size:.72rem;color:#8b949e}
+  input[type=range]{accent-color:#388bfd;width:90px}
+  .time-display{font-size:.72rem;color:#8b949e;margin-left:auto;font-variant-numeric:tabular-nums}
+  .scrub-wrap{flex:1;min-width:120px}
+  #scrub{width:100%;accent-color:#388bfd}
+
+  /* error chart */
+  .chart-section{padding:12px 16px;border-top:1px solid #21262d}
+  .chart-section h2{font-size:.78rem;color:#8b949e;margin-bottom:8px;font-weight:500}
+  .chart-wrap{position:relative;height:130px}
+  #errChart{width:100%;height:100%}
+
+  /* legend */
+  .legend{display:flex;gap:14px;padding:6px 16px 10px;flex-wrap:wrap}
+  .leg-item{display:flex;align-items:center;gap:5px;font-size:.72rem;color:#8b949e}
+  .leg-dot{width:10px;height:10px;border-radius:50%}
+
+  /* error badge */
+  .err-badges{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#21262d;border-top:1px solid #21262d}
+  .err-badge{background:#0d1117;padding:6px 12px;text-align:center}
+  .err-badge .label{font-size:.6rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em}
+  .err-badge .val{font-size:1rem;font-weight:600;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Orientation Estimation — Algorithm Comparison</h1>
+    <p>Real uBlox EVK dataset · ~30 min · 107 Hz IMU · NAV-ATT ground truth</p>
+  </div>
+  <span class="badge">EKF &nbsp;·&nbsp; Madgwick &nbsp;·&nbsp; Mahony</span>
+</header>
+
+<div id="loading"><div class="spinner"></div><span>Loading dataset…</span></div>
+
+<div id="main">
+  <div class="viewers">
+    <div class="viewer-wrap">
+      <div class="viewer-label madg">Madgwick</div>
+      <canvas class="view" id="c0"></canvas>
+      <div class="angles" id="ang0">
+        <div class="angles-cell"><div class="angle-item"><span>Roll</span><span class="angle-val" id="r0">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Pitch</span><span class="angle-val" id="p0">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Yaw</span><span class="angle-val" id="y0">—</span></div></div>
+      </div>
+    </div>
+    <div class="viewer-wrap">
+      <div class="viewer-label maho">Mahony</div>
+      <canvas class="view" id="c1"></canvas>
+      <div class="angles" id="ang1">
+        <div class="angles-cell"><div class="angle-item"><span>Roll</span><span class="angle-val" id="r1">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Pitch</span><span class="angle-val" id="p1">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Yaw</span><span class="angle-val" id="y1">—</span></div></div>
+      </div>
+    </div>
+    <div class="viewer-wrap">
+      <div class="viewer-label ekf">EKF</div>
+      <canvas class="view" id="c2"></canvas>
+      <div class="angles" id="ang2">
+        <div class="angles-cell"><div class="angle-item"><span>Roll</span><span class="angle-val" id="r2">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Pitch</span><span class="angle-val" id="p2">—</span></div></div>
+        <div class="angles-cell"><div class="angle-item"><span>Yaw</span><span class="angle-val" id="y2">—</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="err-badges">
+    <div class="err-badge"><div class="label" style="color:#58a6ff">Madgwick RMSE</div><div class="val" id="rmse0" style="color:#58a6ff">—</div></div>
+    <div class="err-badge"><div class="label" style="color:#3fb950">Mahony RMSE</div><div class="val" id="rmse1" style="color:#3fb950">—</div></div>
+    <div class="err-badge"><div class="label" style="color:#d2a8ff">EKF RMSE</div><div class="val" id="rmse2" style="color:#d2a8ff">—</div></div>
+  </div>
+
+  <div class="controls">
+    <button class="ctrl" id="btnPlay">▶ Play</button>
+    <button class="ctrl" id="btnReset">↺ Reset</button>
+    <span class="speed-label">Speed</span>
+    <input type="range" id="speed" min="0.25" max="8" step="0.25" value="1">
+    <span id="speedVal" class="speed-label">1×</span>
+    <div class="scrub-wrap"><input type="range" id="scrub" min="0" max="1000" value="0"></div>
+    <span class="time-display" id="timeDisp">0:00 / 0:00</span>
+  </div>
+
+  <div class="chart-section">
+    <h2>Absolute orientation error vs. NAV-ATT ground truth (roll+pitch combined RMS, deg)</h2>
+    <div class="chart-wrap"><canvas id="errChart"></canvas></div>
+  </div>
+  <div class="legend">
+    <div class="leg-item"><div class="leg-dot" style="background:#58a6ff"></div>Madgwick</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#3fb950"></div>Mahony</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#d2a8ff"></div>EKF</div>
+    <div class="leg-item"><div class="leg-dot" style="background:#e3b341;border-radius:0;width:16px;height:3px"></div>Ground truth (NAV-ATT)</div>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── load data ────────────────────────────────────────────────────────────────
+const res  = await fetch('data/results.json');
+const data = await res.json();
+
+document.getElementById('loading').style.display = 'none';
+document.getElementById('main').style.display    = 'block';
+
+const N = data.meta.n;
+const algKeys = ['madgwick','mahony','ekf'];
+const colors  = [0x58a6ff, 0x3fb950, 0xd2a8ff];
+const cssColors = ['#58a6ff','#3fb950','#d2a8ff'];
+
+// ── Three.js scenes ──────────────────────────────────────────────────────────
+function makeScene(canvasId, color) {
+  const canvas   = document.getElementById(canvasId);
+  const renderer = new THREE.WebGLRenderer({canvas, antialias:true, alpha:true});
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setClearColor(0x0d1117);
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  camera.position.set(2.2, 1.6, 2.8);
+  camera.lookAt(0,0,0);
+
+  // device box (roughly mimics a GPS/IMU puck)
+  const geo = new THREE.BoxGeometry(1.8, 0.35, 1.1);
+  const mat = new THREE.MeshPhongMaterial({color, shininess:60});
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+
+  // body-frame axes (RGB = XYZ)
+  const axLen = 1.1;
+  const axes = new THREE.AxesHelper(axLen);
+  mesh.add(axes);
+
+  // arrow on top to show front
+  const arrGeo = new THREE.ConeGeometry(0.06, 0.25, 8);
+  const arrMat = new THREE.MeshPhongMaterial({color:0xffffff});
+  const arrow  = new THREE.Mesh(arrGeo, arrMat);
+  arrow.rotation.z = -Math.PI/2;
+  arrow.position.set(0.85, 0.2, 0);
+  mesh.add(arrow);
+
+  // ground plane grid
+  const grid = new THREE.GridHelper(6, 12, 0x21262d, 0x21262d);
+  grid.position.y = -1.0;
+  scene.add(grid);
+
+  // ground-truth ghost box
+  const geoGT = new THREE.BoxGeometry(1.8, 0.35, 1.1);
+  const matGT = new THREE.MeshPhongMaterial({
+    color:0xe3b341, wireframe:true, opacity:0.35, transparent:true
+  });
+  const meshGT = new THREE.Mesh(geoGT, matGT);
+  scene.add(meshGT);
+
+  // lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+  dir.position.set(3,5,4);
+  scene.add(dir);
+
+  function resize() {
+    const w = canvas.clientWidth, h = Math.max(160, Math.round(w*0.55));
+    renderer.setSize(w, h, false);
+    camera.aspect = w/h;
+    camera.updateProjectionMatrix();
+  }
+  resize();
+  new ResizeObserver(resize).observe(canvas);
+
+  // simple orbit drag
+  let drag=false, lastX=0, lastY=0, theta=0.7, phi=0.4, radius=4.5;
+  canvas.addEventListener('mousedown', e=>{drag=true;lastX=e.clientX;lastY=e.clientY});
+  window.addEventListener('mouseup', ()=>drag=false);
+  window.addEventListener('mousemove', e=>{
+    if(!drag) return;
+    theta -= (e.clientX-lastX)*0.01;
+    phi   -= (e.clientY-lastY)*0.01;
+    phi = Math.max(0.1, Math.min(Math.PI/2-0.05, phi));
+    lastX=e.clientX; lastY=e.clientY;
+    camera.position.set(
+      radius*Math.cos(phi)*Math.sin(theta),
+      radius*Math.sin(phi),
+      radius*Math.cos(phi)*Math.cos(theta));
+    camera.lookAt(0,0,0);
+  });
+  canvas.addEventListener('wheel', e=>{
+    radius = Math.max(2,Math.min(10,radius+e.deltaY*0.01));
+    camera.position.setLength(radius);
+  },{passive:true});
+
+  return {renderer, scene, camera, mesh, meshGT};
+}
+
+const views = [
+  makeScene('c0', colors[0]),
+  makeScene('c1', colors[1]),
+  makeScene('c2', colors[2]),
+];
+
+// ── quaternion → THREE.Quaternion ────────────────────────────────────────────
+// Our quats are [w,x,y,z]; gyro in deg/s body frame; Z-up NED convention
+// Three.js uses right-hand Y-up.  Simple mapping: swap axes so the box
+// visually leans in the right direction.
+function applyQuat(mesh, q) {
+  // q = [w, x, y, z]  (our convention)
+  mesh.quaternion.set(q[1], q[2], q[3], q[0]); // THREE: (x,y,z,w)
+}
+
+function eulerToQuat(roll, pitch, yaw) {
+  // degrees to Three.js Euler then quaternion
+  const e = new THREE.Euler(
+    THREE.MathUtils.degToRad(roll),
+    THREE.MathUtils.degToRad(yaw),
+    THREE.MathUtils.degToRad(pitch),
+    'XYZ'
+  );
+  const tq = new THREE.Quaternion().setFromEuler(e);
+  return tq;
+}
+
+// ── error chart ──────────────────────────────────────────────────────────────
+const chartCanvas = document.getElementById('errChart');
+const ctx = chartCanvas.getContext('2d');
+
+function angDiff(a,b){ let d=(a-b+540)%360-180; return d; }
+
+// precompute per-frame tilt error for each algorithm (roll+pitch RMS)
+function computeErrors(algKey) {
+  const euler = data[algKey].euler;
+  const gt    = data.gt.euler;
+  return euler.map((e,i)=>{
+    const dr = angDiff(e[0], gt[i][0]);
+    const dp = angDiff(e[1], gt[i][1]);
+    return Math.sqrt((dr*dr+dp*dp)/2);
+  });
+}
+const errors = algKeys.map(k=>computeErrors(k));
+
+// running RMSE
+function rmse(arr){ return Math.sqrt(arr.reduce((s,v)=>s+v*v,0)/arr.length).toFixed(2); }
+algKeys.forEach((_,i)=>document.getElementById(`rmse${i}`).textContent = rmse(errors[i])+'°');
+
+// downsample chart to max 800 points
+const CHART_PTS = Math.min(800, N);
+const chartStride = Math.max(1, Math.floor(N/CHART_PTS));
+const chartT = data.t.filter((_,i)=>i%chartStride===0);
+const chartErr = errors.map(e=>e.filter((_,i)=>i%chartStride===0));
+
+function drawChart(frameIdx) {
+  const W = chartCanvas.clientWidth, H = chartCanvas.clientHeight;
+  chartCanvas.width  = W * devicePixelRatio;
+  chartCanvas.height = H * devicePixelRatio;
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  ctx.clearRect(0,0,W,H);
+  const pad={l:32,r:8,t:6,b:18};
+  const cw = W-pad.l-pad.r, ch = H-pad.t-pad.b;
+
+  const allVals = chartErr.flat();
+  const maxV = Math.min(90, Math.max(...allVals)*1.1 || 10);
+
+  function tx(i){ return pad.l + (i/(chartT.length-1))*cw; }
+  function ty(v){ return pad.t + ch - (v/maxV)*ch; }
+
+  // grid lines
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
+  [0,0.25,0.5,0.75,1].forEach(f=>{
+    const y=pad.t+ch*(1-f);
+    ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(pad.l+cw,y); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.font=`${10*devicePixelRatio/devicePixelRatio}px sans-serif`;
+    ctx.fillText((maxV*f).toFixed(1)+'°', 0, y+4);
+  });
+
+  // error lines
+  chartErr.forEach((errs,ai)=>{
+    ctx.beginPath();
+    ctx.strokeStyle=cssColors[ai]; ctx.lineWidth=1.5; ctx.globalAlpha=0.85;
+    errs.forEach((v,i)=>i===0?ctx.moveTo(tx(i),ty(v)):ctx.lineTo(tx(i),ty(v)));
+    ctx.stroke();
+  });
+  ctx.globalAlpha=1;
+
+  // playhead
+  const ci = Math.round(frameIdx/chartStride);
+  const px = tx(Math.min(ci, chartT.length-1));
+  ctx.strokeStyle='#ffffff44'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(px,pad.t); ctx.lineTo(px,pad.t+ch); ctx.stroke();
+}
+
+// ── angle display ─────────────────────────────────────────────────────────────
+function fmt(v){ return (v>=0?'+':'')+v.toFixed(1)+'°'; }
+function updateAngles(algIdx, euler) {
+  document.getElementById(`r${algIdx}`).textContent = fmt(euler[0]);
+  document.getElementById(`p${algIdx}`).textContent = fmt(euler[1]);
+  document.getElementById(`y${algIdx}`).textContent = fmt(euler[2]);
+}
+
+// ── playback ─────────────────────────────────────────────────────────────────
+let frameIdx = 0;
+let playing  = false;
+let lastTime = null;
+const speedEl = document.getElementById('speed');
+const speedValEl = document.getElementById('speedVal');
+const scrubEl = document.getElementById('scrub');
+const timeEl  = document.getElementById('timeDisp');
+const playBtn = document.getElementById('btnPlay');
+
+function fmtTime(s){ const m=Math.floor(s/60); return `${m}:${String(Math.floor(s%60)).padStart(2,'0')}`; }
+const totalDur = data.meta.duration_s;
+
+function setFrame(idx) {
+  frameIdx = Math.max(0, Math.min(N-1, idx));
+  algKeys.forEach((k,ai)=>{
+    const q = data[k].q[frameIdx];
+    applyQuat(views[ai].mesh, q);
+    const gtEuler = data.gt.euler[frameIdx];
+    const tq = eulerToQuat(gtEuler[0], gtEuler[1], gtEuler[2]);
+    views[ai].meshGT.quaternion.copy(tq);
+    updateAngles(ai, data[k].euler[frameIdx]);
+  });
+  scrubEl.value = Math.round(frameIdx/N*1000);
+  timeEl.textContent = fmtTime(data.t[frameIdx])+' / '+fmtTime(totalDur);
+  drawChart(frameIdx);
+}
+
+function tick(ts) {
+  if(playing) {
+    if(lastTime !== null) {
+      const speed = parseFloat(speedEl.value);
+      const elapsed = (ts-lastTime)/1000 * speed;
+      const stepsPerSec = data.meta.hz;
+      frameIdx = Math.min(N-1, frameIdx + Math.round(elapsed*stepsPerSec));
+      if(frameIdx >= N-1){ playing=false; playBtn.textContent='▶ Play'; }
+    }
+    lastTime = ts;
+    setFrame(frameIdx);
+  }
+  views.forEach(v=>v.renderer.render(v.scene, v.camera));
+  requestAnimationFrame(tick);
+}
+
+playBtn.addEventListener('click', ()=>{
+  playing = !playing;
+  lastTime = null;
+  if(frameIdx >= N-1) frameIdx = 0;
+  playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+});
+
+document.getElementById('btnReset').addEventListener('click', ()=>{
+  playing=false; lastTime=null; playBtn.textContent='▶ Play';
+  setFrame(0);
+});
+
+speedEl.addEventListener('input', ()=>{ speedValEl.textContent=speedEl.value+'×'; });
+
+scrubEl.addEventListener('input', ()=>{
+  playing=false; lastTime=null; playBtn.textContent='▶ Play';
+  setFrame(Math.round(parseInt(scrubEl.value)/1000*(N-1)));
+});
+
+setFrame(0);
+requestAnimationFrame(tick);
+</script>
 </body>
+</html>
