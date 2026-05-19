@@ -33,7 +33,9 @@
 #define EKF_ACCEL_VAR   0.001f /* sigma_accel=0.0316 m/s²; tight trust in accel measurement */
 #define EKF_MAG_VAR     1e6f   /* large → effectively disables magnetometer */
 #define EKF_DIP         0.0f
-#define EKF_HEADING_VAR 0.0005f /* sigma_heading ≈ 1.3° → variance in rad² */
+#define EKF_HEADING_VAR      0.0005f /* sigma_heading ≈ 1.3° → variance in rad² */
+#define MADGWICK_HEADING_ALPHA 0.3f  /* yaw correction gain for Madgwick (0=none, 1=hard) */
+#define MAHONY_HEADING_ALPHA   0.3f  /* yaw correction gain for Mahony */
 
 #define TARGET_HZ       10
 #define IMU_HZ_APPROX   107    /* used to compute stride; will be measured */
@@ -41,6 +43,40 @@
 /* ── CSV paths ─────────────────────────────────────────────────────────── */
 #define IMU_CSV  "data/imu_raw.csv"
 #define GT_CSV   "data/ground_truth.csv"
+
+/* ── yaw heading correction for non-EKF filters ────────────────────────── */
+/* Applies a simple yaw-only correction by decomposing the quaternion into
+   tilt × yaw, replacing the yaw part with the GPS measurement, and
+   blending back using a fixed gain alpha (0=no correction, 1=hard set). */
+static void apply_heading_correction(QUATERNION *q, float heading_rad, float alpha)
+{
+    float w = q->dW, x = q->dX, y = q->dY, z = q->dZ;
+
+    /* current yaw from quaternion */
+    float yaw_cur = atan2f(2.0f*(w*z + x*y), 1.0f - 2.0f*(y*y + z*z));
+
+    /* innovation wrapped to [-pi, pi] */
+    float v = heading_rad - yaw_cur;
+    while (v >  (float)PI) v -= 2.0f*(float)PI;
+    while (v < -(float)PI) v += 2.0f*(float)PI;
+
+    /* apply yaw rotation delta: rotate by dYaw/2 around Z in body->NED frame
+       For small dYaw: q_new ≈ q ⊗ [cos(dYaw/2), 0, 0, sin(dYaw/2)]
+       Using alpha to scale the correction step */
+    float dYaw = alpha * v;
+    float half = dYaw * 0.5f;
+    float cz = cosf(half), sz = sinf(half);
+
+    float nw =  w*cz - z*sz;   /* note: for NED yaw rotation around down axis */
+    float nx =  x*cz + y*sz;   /* q_new = q ⊗ [cz, 0, 0, sz] */
+    float ny = -x*sz + y*cz;
+    float nz =  w*sz + z*cz;
+
+    /* normalise */
+    float norm = sqrtf(nw*nw + nx*nx + ny*ny + nz*nz);
+    if (norm < 1e-9f) return;
+    q->dW = nw/norm;  q->dX = nx/norm;  q->dY = ny/norm;  q->dZ = nz/norm;
+}
 
 /* ── simple dynamic array of doubles ───────────────────────────────────── */
 typedef struct {
@@ -232,6 +268,8 @@ int main(void)
             if (yaw_deg > 180.0) yaw_deg -= 360.0;
             float heading_rad = (float)(yaw_deg * PI / 180.0);
             ekf_Correction_Heading(&ekf, heading_rad, EKF_HEADING_VAR);
+            apply_heading_correction(&madg.qMadgwickQuat, heading_rad, MADGWICK_HEADING_ALPHA);
+            apply_heading_correction(&maho.qMahonyQuat,   heading_rad, MAHONY_HEADING_ALPHA);
             gt_idx++;
         }
 
