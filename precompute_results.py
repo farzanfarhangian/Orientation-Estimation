@@ -71,15 +71,16 @@ def main():
     for t in df['t'].values:
         gi = np.searchsorted(gt_ts, t)
         if gi == 0:
-            out_gt.append([round(gt_roll[0],4), round(gt_pit[0],4), round(gt_yaw[0],4)])
+            out_gt.append([round(gt_roll[0],4), round(gt_pit[0],4), round(ang_wrap(gt_yaw[0]),4)])
         elif gi >= len(gt_ts):
-            out_gt.append([round(gt_roll[-1],4), round(gt_pit[-1],4), round(gt_yaw[-1],4)])
+            out_gt.append([round(gt_roll[-1],4), round(gt_pit[-1],4), round(ang_wrap(gt_yaw[-1]),4)])
         else:
             t0, t1 = gt_ts[gi-1], gt_ts[gi]
             alpha = (t - t0) / (t1 - t0) if t1 != t0 else 0.0
             r = gt_roll[gi-1] + alpha * (gt_roll[gi] - gt_roll[gi-1])
             p = gt_pit[gi-1]  + alpha * (gt_pit[gi]  - gt_pit[gi-1])
             y = gt_yaw[gi-1]  + alpha * (gt_yaw[gi]  - gt_yaw[gi-1])
+            y = ang_wrap(y)
             out_gt.append([round(r,4), round(p,4), round(y,4)])
 
     # output rate (from actual sample times)
