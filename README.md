@@ -2,7 +2,7 @@
 
 **Real-time 3D attitude estimation using Madgwick, Mahony, and Extended Kalman Filter — benchmarked against u-blox NAV-ATT ground truth.**
 
-[**Live Demo →**](https://farzanfarhangian.github.io/Orientation-Estimation/)
+[**Live Demo →**](https://farzanfarhangian.github.io/Orientation-Estimation/)  
 
 ---
 
@@ -17,6 +17,8 @@ All algorithms are **6-DoF** (accelerometer + gyroscope only). Yaw observability
 ## Live Demo
 
 > **[farzanfarhangian.github.io/Orientation-Estimation](https://farzanfarhangian.github.io/Orientation-Estimation/)**
+
+[![Demo](Demo_orientation.png)](https://farzanfarhangian.github.io/Orientation-Estimation/)
 
 The visualizer shows:
 - Three synchronized 3D device boxes (one per algorithm), with a yellow wireframe ground-truth ghost overlay
