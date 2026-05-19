@@ -2,7 +2,9 @@
 
 **Real-time 3D attitude estimation using Madgwick, Mahony, and Extended Kalman Filter — benchmarked against u-blox NAV-ATT ground truth.**
 
-[**Live Demo →**](https://farzanfarhangian.github.io/Orientation-Estimation/)  
+[**Live Demo →**](https://farzanfarhangian.github.io/Orientation-Estimation/)
+
+[![Demo](Demo_orientation.png)](https://farzanfarhangian.github.io/Orientation-Estimation/)
 
 ---
 
@@ -11,14 +13,6 @@
 This project implements and compares three industry-standard orientation estimation algorithms entirely in C, evaluated on real IMU data collected from a u-blox EVK GNSS/IMU module. A Python pipeline feeds the C output into an interactive Three.js visualizer that lets you scrub through the full dataset and watch all three algorithms track the device's attitude in real time.
 
 All algorithms are **6-DoF** (accelerometer + gyroscope only). Yaw observability is restored by fusing **GPS heading** from the u-blox NAV-ATT message — giving each algorithm a real heading reference rather than leaving yaw as an unobservable degree of freedom.
-
----
-
-## Live Demo
-
-> **[farzanfarhangian.github.io/Orientation-Estimation](https://farzanfarhangian.github.io/Orientation-Estimation/)**
-
-[![Demo](Demo_orientation.png)](https://farzanfarhangian.github.io/Orientation-Estimation/)
 
 The visualizer shows:
 - Three synchronized 3D device boxes (one per algorithm), with a yellow wireframe ground-truth ghost overlay
