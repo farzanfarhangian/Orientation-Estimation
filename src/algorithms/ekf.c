@@ -550,6 +550,115 @@ void ekf_Correction_No_Mag(
 	pDataFrame->vCovarianceP.dROW4.dZ = dP.matrix[3][3];
 }
 
+void ekf_Correction_Heading(
+    EKF_DATA_FRAME * pDataFrame,
+    float dHeadingRad,
+    float dHeadingSigma2)
+{
+    float w = pDataFrame->qEkfQuat.dW;
+    float x = pDataFrame->qEkfQuat.dX;
+    float y = pDataFrame->qEkfQuat.dY;
+    float z = pDataFrame->qEkfQuat.dZ;
+
+    /* predicted yaw from current quaternion */
+    float yaw_pred = atan2f(2.0f*(w*z + x*y), 1.0f - 2.0f*(y*y + z*z));
+
+    /* innovation: wrap to [-pi, pi] */
+    float v = dHeadingRad - yaw_pred;
+    while (v >  (float)PI) v -= 2.0f*(float)PI;
+    while (v < -(float)PI) v += 2.0f*(float)PI;
+
+    /* Jacobian H (1×4): d(yaw)/dq
+     * yaw = atan2(A, B), A = 2(wz+xy), B = 1-2(y²+z²)
+     * dH/dq_i = (B·dA/dq_i - A·dB/dq_i) / (A²+B²) */
+    float A = 2.0f*(w*z + x*y);
+    float B = 1.0f - 2.0f*(y*y + z*z);
+    float denom = A*A + B*B;
+    if (denom < 1e-9f) return;
+    float H[4];
+    H[0] = ( 2.0f*B*z               ) / denom;   /* dA/dw=2z,  dB/dw=0   */
+    H[1] = ( 2.0f*B*y               ) / denom;   /* dA/dx=2y,  dB/dx=0   */
+    H[2] = ( 2.0f*B*x + 4.0f*A*y   ) / denom;   /* dA/dy=2x,  dB/dy=-4y */
+    H[3] = ( 2.0f*B*w + 4.0f*A*z   ) / denom;   /* dA/dz=2w,  dB/dz=-4z */
+
+    /* load P */
+    MATRIX_f dP;
+    ekf_AllocateMatrix(&dP, 4, 4);
+    dP.matrix[0][0] = pDataFrame->vCovarianceP.dROW1.dW;
+    dP.matrix[0][1] = pDataFrame->vCovarianceP.dROW1.dX;
+    dP.matrix[0][2] = pDataFrame->vCovarianceP.dROW1.dY;
+    dP.matrix[0][3] = pDataFrame->vCovarianceP.dROW1.dZ;
+    dP.matrix[1][0] = pDataFrame->vCovarianceP.dROW2.dW;
+    dP.matrix[1][1] = pDataFrame->vCovarianceP.dROW2.dX;
+    dP.matrix[1][2] = pDataFrame->vCovarianceP.dROW2.dY;
+    dP.matrix[1][3] = pDataFrame->vCovarianceP.dROW2.dZ;
+    dP.matrix[2][0] = pDataFrame->vCovarianceP.dROW3.dW;
+    dP.matrix[2][1] = pDataFrame->vCovarianceP.dROW3.dX;
+    dP.matrix[2][2] = pDataFrame->vCovarianceP.dROW3.dY;
+    dP.matrix[2][3] = pDataFrame->vCovarianceP.dROW3.dZ;
+    dP.matrix[3][0] = pDataFrame->vCovarianceP.dROW4.dW;
+    dP.matrix[3][1] = pDataFrame->vCovarianceP.dROW4.dX;
+    dP.matrix[3][2] = pDataFrame->vCovarianceP.dROW4.dY;
+    dP.matrix[3][3] = pDataFrame->vCovarianceP.dROW4.dZ;
+
+    /* S = H P H' + R  (scalar) */
+    float PH[4];
+    for (int i = 0; i < 4; i++) {
+        PH[i] = 0.0f;
+        for (int j = 0; j < 4; j++) PH[i] += dP.matrix[i][j] * H[j];
+    }
+    float S = 0.0f;
+    for (int i = 0; i < 4; i++) S += H[i] * PH[i];
+    S += dHeadingSigma2;
+
+    /* K = PH' / S  (4×1) */
+    float K[4];
+    for (int i = 0; i < 4; i++) K[i] = PH[i] / S;
+
+    /* update quaternion */
+    pDataFrame->qEkfQuat.dW += K[0] * v;
+    pDataFrame->qEkfQuat.dX += K[1] * v;
+    pDataFrame->qEkfQuat.dY += K[2] * v;
+    pDataFrame->qEkfQuat.dZ += K[3] * v;
+    mathTransform_NormalizeQuat(&pDataFrame->qEkfQuat, &pDataFrame->qEkfQuat);
+
+    /* Joseph form: P = (I-KH)P(I-KH)' + K R K' */
+    float IKH[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            IKH[i][j] = (i==j ? 1.0f : 0.0f) - K[i]*H[j];
+
+    float tmp[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            tmp[i][j] = 0.0f;
+            for (int k = 0; k < 4; k++) tmp[i][j] += IKH[i][k] * dP.matrix[k][j];
+        }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            dP.matrix[i][j] = 0.0f;
+            for (int k = 0; k < 4; k++) dP.matrix[i][j] += tmp[i][k] * IKH[j][k];
+            dP.matrix[i][j] += K[i] * dHeadingSigma2 * K[j];
+        }
+
+    pDataFrame->vCovarianceP.dROW1.dW = dP.matrix[0][0];
+    pDataFrame->vCovarianceP.dROW1.dX = dP.matrix[0][1];
+    pDataFrame->vCovarianceP.dROW1.dY = dP.matrix[0][2];
+    pDataFrame->vCovarianceP.dROW1.dZ = dP.matrix[0][3];
+    pDataFrame->vCovarianceP.dROW2.dW = dP.matrix[1][0];
+    pDataFrame->vCovarianceP.dROW2.dX = dP.matrix[1][1];
+    pDataFrame->vCovarianceP.dROW2.dY = dP.matrix[1][2];
+    pDataFrame->vCovarianceP.dROW2.dZ = dP.matrix[1][3];
+    pDataFrame->vCovarianceP.dROW3.dW = dP.matrix[2][0];
+    pDataFrame->vCovarianceP.dROW3.dX = dP.matrix[2][1];
+    pDataFrame->vCovarianceP.dROW3.dY = dP.matrix[2][2];
+    pDataFrame->vCovarianceP.dROW3.dZ = dP.matrix[2][3];
+    pDataFrame->vCovarianceP.dROW4.dW = dP.matrix[3][0];
+    pDataFrame->vCovarianceP.dROW4.dX = dP.matrix[3][1];
+    pDataFrame->vCovarianceP.dROW4.dY = dP.matrix[3][2];
+    pDataFrame->vCovarianceP.dROW4.dZ = dP.matrix[3][3];
+}
+
 void ekf_Update(
     EKF_DATA_FRAME * ptEkf,
     const VECTOR_3D * vAccel,

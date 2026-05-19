@@ -45,6 +45,16 @@ void ekf_Correction_No_Mag(
     EKF_DATA_FRAME * pDataFrame,
     const VECTOR_3D * pvDeviceAccel);
 
+/**
+ * @brief EKF yaw (heading) correction using GPS heading measurement
+ * @param dHeadingRad  GPS heading in radians (wrapped to [-pi, pi])
+ * @param dHeadingSigma2  heading measurement variance in rad^2
+ */
+void ekf_Correction_Heading(
+    EKF_DATA_FRAME * pDataFrame,
+    float dHeadingRad,
+    float dHeadingSigma2);
+
 
 /**
  * @brief EKF main update

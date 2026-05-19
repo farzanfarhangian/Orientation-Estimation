@@ -33,6 +33,7 @@
 #define EKF_ACCEL_VAR   0.001f /* sigma_accel=0.0316 m/s²; tight trust in accel measurement */
 #define EKF_MAG_VAR     1e6f   /* large → effectively disables magnetometer */
 #define EKF_DIP         0.0f
+#define EKF_HEADING_VAR 0.0005f /* sigma_heading ≈ 1.3° → variance in rad² */
 
 #define TARGET_HZ       10
 #define IMU_HZ_APPROX   107    /* used to compute stride; will be measured */
@@ -200,6 +201,9 @@ int main(void)
     /* ── 5. Main loop ─────────────────────────────────────────────────────── */
     float deg = (float)(180.0 / PI);
 
+    /* GT heading pointer: advance through gt_t/gt_y to find new samples */
+    size_t gt_idx = 0;
+
     for (size_t idx = 0; idx < N; idx++) {
         float dt  = (idx == 0) ? (float)dt_imu : (float)(imu_t.d[idx] - imu_t.d[idx-1]);
         if (dt <= 0.0f) dt = (float)dt_imu;
@@ -219,6 +223,17 @@ int main(void)
         madgwick_6Dof_Update(&madg, &accel, &gyro, dt);
         mahony_6Dof_Update(&maho, &accel, &gyro, dt);
         ekf_Update(&ekf, &accel, &gyro, &zero_mag, dt);
+
+        /* Apply GPS heading correction whenever a new GT sample arrives.
+           Wrap to [-pi, pi] to match the atan2 output in ekf_Correction_Heading. */
+        while (gt_idx < gt_t.n && gt_t.d[gt_idx] <= imu_t.d[idx]) {
+            double yaw_deg = gt_y.d[gt_idx];
+            /* wrap 0-360 → -180..+180 */
+            if (yaw_deg > 180.0) yaw_deg -= 360.0;
+            float heading_rad = (float)(yaw_deg * PI / 180.0);
+            ekf_Correction_Heading(&ekf, heading_rad, EKF_HEADING_VAR);
+            gt_idx++;
+        }
 
         if ((int)idx % stride == 0) {
             QUATERNION qm = madgwick_GetQuat(&madg);
