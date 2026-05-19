@@ -3,6 +3,9 @@
  * @file madgwick.h
  */
 
+#ifndef MADGWICK_H
+#define MADGWICK_H
+
 #include "stdbool.h"
 #include "orientationDefines.h"
 
@@ -50,3 +53,5 @@ void madgwick_9Dof_Update(
  * @brief Get quaternion for Madgwick filter
  */
 QUATERNION madgwick_GetQuat(MADGWICK_DATA_FRAME * pDataFrame);
+
+#endif /* MADGWICK_H */

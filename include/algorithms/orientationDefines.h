@@ -3,6 +3,9 @@
  * @file orientationDefines.h
  */
 
+#ifndef ORIENTATION_DEFINES_H
+#define ORIENTATION_DEFINES_H
+
 #include <stdbool.h>
 
 typedef unsigned char uint8_t;
@@ -112,5 +115,4 @@ void mathTransform_QuaternionDerivative(QUATERNION * pqQuaternionDot, const QUAT
 
 void mathTransform_InitializeQuaternion(QUATERNION * pqOutput, const VECTOR_3D * pvDeviceAccel, const float * pdHeading);
 
-
-
+#endif /* ORIENTATION_DEFINES_H */

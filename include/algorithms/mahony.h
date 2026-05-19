@@ -3,6 +3,9 @@
  * @file mahony.h
  */
 
+#ifndef MAHONY_H
+#define MAHONY_H
+
 #include "orientationDefines.h"
 
 /**
@@ -51,3 +54,5 @@ void mahony_9Dof_Update(
  * @brief Extract Mahony Quaternion from Data Frame
  */
 QUATERNION mahony_GetQuat(MAHONY_DATA_FRAME * pDataFrame);
+
+#endif /* MAHONY_H */

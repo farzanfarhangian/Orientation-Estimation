@@ -1,213 +1,252 @@
+/**
+ * @author Farzan Farhangian
+ * @file main.c
+ *
+ * Runs Madgwick, Mahony, and EKF on IMU data from data/imu_raw.csv and
+ * ground-truth initialisation from data/ground_truth.csv.
+ * Prints downsampled results as CSV to stdout:
+ *   t,mw,mx,my,mz,mr,mp,my_deg,hw,hx,hy,hz,hr,hp,hy_deg,ew,ex,ey,ez,er,ep,ey_deg
+ *
+ * Gyro in CSV is deg/s → converted to rad/s before passing to algorithms.
+ * All three algorithms are 6-DoF (accel only); no magnetometer is used.
+ *
+ * Build:  make
+ * Run:    ./my_prog
+ */
+
 #include <stdio.h>
-#include <inttypes.h>
-#include <Windows.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
-/* Include files needed to use VnSensor. */
-#include "vn/sensors.h"
+#include "algorithms/madgwick.h"
+#include "algorithms/mahony.h"
+#include "algorithms/ekf.h"
 
-void asciiOrBinaryAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex);
-int processErrorReceived(char* errorMessage, VnError errorCode);
+/* ── tuning parameters ─────────────────────────────────────────────────── */
+#define MADGWICK_BETA   0.033f
+#define MADGWICK_ZETA   0.0f
+#define MAHONY_BETA     0.0f
+#define MAHONY_KP       0.5f
+#define MAHONY_KI       0.1f
+#define EKF_GYRO_VAR    0.005f
+#define EKF_ACCEL_VAR   0.1f
+#define EKF_MAG_VAR     1e6f   /* large → effectively disables magnetometer */
+#define EKF_DIP         0.0f
 
-FILE *gnuplotPipe;
-char * commandsForGnuplot = "plot 'data.temp' using 1:2 title 'x' with lines,\
-								'data.temp' using 1:3 title 'y' with lines,\
-								'data.temp' using 1:4 title 'z' with lines";
-FILE * temp;
+#define TARGET_HZ       10
+#define IMU_HZ_APPROX   107    /* used to compute stride; will be measured */
 
+/* ── CSV paths ─────────────────────────────────────────────────────────── */
+#define IMU_CSV  "data/imu_raw.csv"
+#define GT_CSV   "data/ground_truth.csv"
+
+/* ── simple dynamic array of doubles ───────────────────────────────────── */
+typedef struct {
+    double *d;
+    size_t  n;
+    size_t  cap;
+} DblArr;
+
+static void da_push(DblArr *a, double v) {
+    if (a->n >= a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 4096;
+        a->d = realloc(a->d, a->cap * sizeof(double));
+    }
+    a->d[a->n++] = v;
+}
+
+static void da_free(DblArr *a) { free(a->d); a->d = NULL; a->n = a->cap = 0; }
+
+/* ── CSV parsing helpers ────────────────────────────────────────────────── */
+static int skip_header(FILE *f) {
+    char buf[512];
+    return fgets(buf, sizeof(buf), f) != NULL;
+}
+
+/* ── main ──────────────────────────────────────────────────────────────── */
 int main(void)
 {
-	VnSensor vs;
-	char modelNumber[30];
-	char strConversions[50];
-	vec3f ypr;
-	YawPitchRollMagneticAccelerationAndAngularRatesRegister reg;
-	VpeBasicControlRegister vpeReg;
-	uint32_t oldHz, newHz;
-	VnAsciiAsync asyncType;
-	BinaryOutputRegister bor;
-	VnError error;
+    /* ── 1. Load ground-truth CSV to find the valid window and init angles ── */
+    FILE *fgt = fopen(GT_CSV, "r");
+    if (!fgt) { fprintf(stderr, "Cannot open %s\n", GT_CSV); return 1; }
+    skip_header(fgt);
 
-	// Open a pipe to gnuplot
-	temp = fopen("data.temp", "w");
+    /* columns: timestamp_s, roll, pitch, yaw (degrees) */
+    DblArr gt_t = {0}, gt_r = {0}, gt_p = {0}, gt_y = {0};
+    double ts, roll, pitch, yaw_deg;
+    char line[256];
+    while (fgets(line, sizeof(line), fgt)) {
+        if (sscanf(line, "%lf,%lf,%lf,%lf", &ts, &roll, &pitch, &yaw_deg) == 4) {
+            /* skip rows where GPS heading is not yet valid (roll == 0 at start) */
+            if (roll == 0.0 && gt_t.n == 0) continue;
+            da_push(&gt_t, ts);
+            da_push(&gt_r, roll);
+            da_push(&gt_p, pitch);
+            da_push(&gt_y, yaw_deg);
+        }
+    }
+    fclose(fgt);
 
-    gnuplotPipe = _popen("gnuplot -persist", "w");
-    if (gnuplotPipe == NULL) {
-        fprintf(stderr, "Error opening pipe to gnuplot\n");
-        return 1;
+    if (gt_t.n == 0) { fprintf(stderr, "No valid ground-truth rows.\n"); return 1; }
+
+    double T_START = gt_t.d[0];
+    double T_END   = T_START + 600.0;   /* 10-minute window */
+
+    fprintf(stderr, "GT window: %.1f s – %.1f s  (%zu samples)\n",
+            T_START, T_END, gt_t.n);
+    fprintf(stderr, "Init: roll=%.2f  pitch=%.2f  yaw=%.2f deg\n",
+            gt_r.d[0], gt_p.d[0], gt_y.d[0]);
+
+    /* ── 2. Load IMU CSV into memory (trimmed to window) ─────────────────── */
+    FILE *fimu = fopen(IMU_CSV, "r");
+    if (!fimu) { fprintf(stderr, "Cannot open %s\n", IMU_CSV); return 1; }
+    skip_header(fimu);
+
+    /* columns: timestamp_s, accel_x/y/z (m/s²), gyro_x/y/z (deg/s) */
+    DblArr imu_t  = {0};
+    DblArr imu_ax = {0}, imu_ay = {0}, imu_az = {0};
+    DblArr imu_gx = {0}, imu_gy = {0}, imu_gz = {0};
+
+    double ax, ay, az, gx, gy, gz;
+    while (fgets(line, sizeof(line), fimu)) {
+        if (sscanf(line, "%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+                   &ts, &ax, &ay, &az, &gx, &gy, &gz) == 7) {
+            if (ts < T_START || ts > T_END) continue;
+            da_push(&imu_t,  ts);
+            da_push(&imu_ax, ax);  da_push(&imu_ay, ay);  da_push(&imu_az, az);
+            da_push(&imu_gx, gx);  da_push(&imu_gy, gy);  da_push(&imu_gz, gz);
+        }
+    }
+    fclose(fimu);
+
+    size_t N = imu_t.n;
+    fprintf(stderr, "IMU samples in window: %zu\n", N);
+    if (N < 2) { fprintf(stderr, "Too few IMU samples.\n"); return 1; }
+
+    /* median dt from first 1000 diffs */
+    double dt_imu;
+    {
+        size_t check = N < 1001 ? N - 1 : 1000;
+        double dts[1001];
+        for (size_t i = 0; i < check; i++)
+            dts[i] = imu_t.d[i+1] - imu_t.d[i];
+        /* simple selection for median */
+        for (size_t i = 0; i < check - 1; i++)
+            for (size_t j = i+1; j < check; j++)
+                if (dts[j] < dts[i]) { double tmp=dts[i]; dts[i]=dts[j]; dts[j]=tmp; }
+        dt_imu = dts[check/2];
+    }
+    int stride = (int)round(1.0 / (TARGET_HZ * dt_imu));
+    if (stride < 1) stride = 1;
+    fprintf(stderr, "dt_imu=%.3f ms  stride=%d  → ~%.1f Hz output\n",
+            dt_imu*1000.0, stride, 1.0/(stride*dt_imu));
+
+    /* ── 3. Initialise all three filters from first GT sample ───────────── */
+    float init_heading_deg = (float)gt_y.d[0];
+    VECTOR_3D init_accel = {
+        (float)imu_ax.d[0],
+        (float)imu_ay.d[0],
+        (float)imu_az.d[0]
+    };
+
+    /* Use euler_to_quat logic via mathTransform_InitializeQuaternion,
+       but that only sets tilt from accel and optionally yaw from heading.
+       We want roll+pitch+yaw all from GT, so build the quaternion manually
+       from GT Euler angles using mathTransform_EulerToQuat. */
+    VECTOR_3D init_euler_rad = {
+        (float)(gt_r.d[0] * PI / 180.0),   /* roll  */
+        (float)(gt_p.d[0] * PI / 180.0),   /* pitch */
+        (float)(gt_y.d[0] * PI / 180.0)    /* yaw   */
+    };
+    QUATERNION q_init = {1.0f, 0.0f, 0.0f, 0.0f};
+    mathTransform_EulerToQuat(&q_init, &init_euler_rad);
+
+    /* Madgwick */
+    MADGWICK_DATA_FRAME madg = {0};
+    {
+        VECTOR_3D gyro_bias = {0.0f, 0.0f, 0.0f};
+        madgwick_Init(&madg, &init_heading_deg, &init_accel, &gyro_bias,
+                      MADGWICK_BETA, MADGWICK_ZETA);
+        madg.qMadgwickQuat = q_init;  /* override with full GT init */
     }
 
-	const char SENSOR_PORT[] = "COM3";
-	const uint32_t SENSOR_BAUDRATE = 115200;
+    /* Mahony */
+    MAHONY_DATA_FRAME maho = {0};
+    mahony_Init(&maho, &init_heading_deg, &init_accel,
+                MAHONY_BETA, MAHONY_KP, MAHONY_KI);
+    maho.qMahonyQuat = q_init;
 
-	/* We first need to initialize our VnSensor structure. */
-	VnSensor_initialize(&vs);
+    /* EKF */
+    EKF_DATA_FRAME ekf = {0};
+    ekf_Init(&ekf, &init_heading_deg, &init_accel,
+             EKF_GYRO_VAR, EKF_ACCEL_VAR, EKF_MAG_VAR, EKF_DIP);
+    ekf.qEkfQuat = q_init;
 
-	/* Now connect to our sensor. */
-	if ((error = VnSensor_connect(&vs, SENSOR_PORT, SENSOR_BAUDRATE)) != E_NONE)
-		return processErrorReceived("Error connecting to sensor.", error);
+    /* zero-magnitude mag → ekf_Update will call ekf_Correction_No_Mag */
+    VECTOR_3D zero_mag = {0.0f, 0.0f, 0.0f};
 
-	/* Let's query the sensor's model number. */
-	if ((error = VnSensor_readModelNumber(&vs, modelNumber, sizeof(modelNumber))) != E_NONE)
-	{
-		//return processErrorReceived("Error reading model number.", error);
-		printf("Error reading model number.\n");
-		goto finish;
-	}
-		
-	printf("Model Number: %s\n", modelNumber);
+    /* ── 4. Print CSV header ──────────────────────────────────────────────── */
+    printf("t,"
+           "madg_w,madg_x,madg_y,madg_z,madg_roll,madg_pitch,madg_yaw,"
+           "maho_w,maho_x,maho_y,maho_z,maho_roll,maho_pitch,maho_yaw,"
+           "ekf_w,ekf_x,ekf_y,ekf_z,ekf_roll,ekf_pitch,ekf_yaw\n");
 
-	/* Get some orientation data from the sensor. */
-	if ((error = VnSensor_readYawPitchRoll(&vs, &ypr)) != E_NONE)
-	{
-		//return processErrorReceived("Error reading yaw pitch roll.", error);
-		printf("Error reading yaw pitch roll.\n");
-		goto finish;
-	}
-		
-	str_vec3f(strConversions, ypr);
-	printf("Current YPR: %s\n", strConversions);
+    /* ── 5. Main loop ─────────────────────────────────────────────────────── */
+    float deg = (float)(180.0 / PI);
 
-	/* Get some orientation and IMU data. */
-	if ((error = VnSensor_readYawPitchRollMagneticAccelerationAndAngularRates(&vs, &reg)) != E_NONE)
-		return processErrorReceived("Error reading orientation and IMU data.", error);
-	str_vec3f(strConversions, reg.yawPitchRoll);
-	printf("Current YPR: %s\n", strConversions);
-	str_vec3f(strConversions, reg.mag);
-	printf("Current Magnetic: %s\n", strConversions);
-	str_vec3f(strConversions, reg.accel);
-	printf("Current Acceleration: %s\n", strConversions);
-	str_vec3f(strConversions, reg.gyro);
-	printf("Current Angular Rates: %s\n", strConversions);
+    for (size_t idx = 0; idx < N; idx++) {
+        float dt  = (idx == 0) ? (float)dt_imu : (float)(imu_t.d[idx] - imu_t.d[idx-1]);
+        if (dt <= 0.0f) dt = (float)dt_imu;
 
-	
-	if ((error = VnSensor_writeAsyncDataOutputFrequency(&vs, 40, true)) != E_NONE)
-	{
-		//return processErrorReceived("Error writing async data output frequency.", error);
-		printf("Error writing async data output frequency.\n");
-		goto finish;
-	}
-		
-	if ((error = VnSensor_readAsyncDataOutputFrequency(&vs, &newHz)) != E_NONE)
-	{
-		//return processErrorReceived("Error reading async data output frequency.", error);
-		printf("Error reading async data output frequency.\n");
-		goto finish;
-	}
-		
-	//printf("Old Async Frequency: %d Hz\n", oldHz);
-	printf("New Async Frequency: %d Hz\n", newHz);
+        /* gyro: CSV is deg/s, algorithms expect rad/s */
+        VECTOR_3D gyro = {
+            (float)(imu_gx.d[idx] * PI / 180.0),
+            (float)(imu_gy.d[idx] * PI / 180.0),
+            (float)(imu_gz.d[idx] * PI / 180.0)
+        };
+        VECTOR_3D accel = {
+            (float)imu_ax.d[idx],
+            (float)imu_ay.d[idx],
+            (float)imu_az.d[idx]
+        };
 
-	BinaryOutputRegister_initialize(
-		&bor,ASYNCMODE_PORT1, 20,
-		COMMONGROUP_TIMESTARTUP | COMMONGROUP_YAWPITCHROLL,	/* Note use of binary OR to configure flags. */
-		TIMEGROUP_NONE, IMUGROUP_NONE, GPSGROUP_NONE, ATTITUDEGROUP_NONE, INSGROUP_NONE, GPSGROUP_NONE);
+        madgwick_6Dof_Update(&madg, &accel, &gyro, dt);
+        mahony_6Dof_Update(&maho, &accel, &gyro, dt);
+        ekf_Update(&ekf, &accel, &gyro, &zero_mag, dt);
 
-	if ((error = VnSensor_writeBinaryOutput1(&vs, &bor, true)) != E_NONE)
-	{
-		//return processErrorReceived("Error writing binary output 1.", error);
-		printf("Error writing binary output 1.\n");
-		goto finish;
-	}
+        if ((int)idx % stride == 0) {
+            QUATERNION qm = madgwick_GetQuat(&madg);
+            QUATERNION qh = mahony_GetQuat(&maho);
+            QUATERNION qe = ekf_GetQuat(&ekf);
 
-	VnSensor_registerAsyncPacketReceivedHandler(&vs, asciiOrBinaryAsyncMessageReceived, NULL);
+            VECTOR_3D em, eh, ee;
+            mathTransform_QuatToEuler(&em, &qm);
+            mathTransform_QuatToEuler(&eh, &qh);
+            mathTransform_QuatToEuler(&ee, &qe);
 
-	printf("Starting sleep...\n");
-	VnThread_sleepSec(50);
+            printf("%.4f,"
+                   "%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,"
+                   "%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,"
+                   "%.6f,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f\n",
+                   imu_t.d[idx],
+                   qm.dW, qm.dX, qm.dY, qm.dZ,
+                   em.dX*deg, em.dY*deg, em.dZ*deg,
+                   qh.dW, qh.dX, qh.dY, qh.dZ,
+                   eh.dX*deg, eh.dY*deg, eh.dZ*deg,
+                   qe.dW, qe.dX, qe.dY, qe.dZ,
+                   ee.dX*deg, ee.dY*deg, ee.dZ*deg);
+        }
 
-	VnSensor_unregisterAsyncPacketReceivedHandler(&vs);
-	
-	finish:
+        if (idx % 10000 == 0)
+            fprintf(stderr, "  %zu / %zu (%.0f%%)\n", idx, N, 100.0*idx/N);
+    }
 
-	 _pclose(gnuplotPipe);
+    da_free(&gt_t); da_free(&gt_r); da_free(&gt_p); da_free(&gt_y);
+    da_free(&imu_t);
+    da_free(&imu_ax); da_free(&imu_ay); da_free(&imu_az);
+    da_free(&imu_gx); da_free(&imu_gy); da_free(&imu_gz);
 
-	/* Now disconnect from the sensor since we are finished. */
-	if ((error = VnSensor_disconnect(&vs)) != E_NONE)
-		return processErrorReceived("Error disconnecting from sensor.", error);
-
-	return 0;
-}
-
-void asciiOrBinaryAsyncMessageReceived(void *userData, VnUartPacket *packet, size_t runningIndex)
-{
-	vec3f ypr;
-	char strConversions[50];
-	static int cnt = 0;
-
-	/* Silence 'unreferenced formal parameters' warning in Visual Studio. */
-	(userData);
-	(runningIndex);
-
-	if (VnUartPacket_type(packet) == PACKETTYPE_ASCII && VnUartPacket_determineAsciiAsyncType(packet) == VNYPR)
-	{
-		VnUartPacket_parseVNYPR(packet, &ypr);
-		str_vec3f(strConversions, ypr);
-		printf("ASCII Async YPR: %s\n", strConversions);
-
-		return;
-	}
-
-	if (VnUartPacket_type(packet) == PACKETTYPE_BINARY)
-	{
-		uint64_t timeStartup;
-
-		/* First make sure we have a binary packet type we expect since there
-		 * are many types of binary output types that can be configured. */
-		if (!VnUartPacket_isCompatible(packet,
-			COMMONGROUP_TIMESTARTUP | COMMONGROUP_YAWPITCHROLL,
-			TIMEGROUP_NONE,
-			IMUGROUP_NONE,
-			GPSGROUP_NONE,
-			ATTITUDEGROUP_NONE,
-			INSGROUP_NONE,
-      GPSGROUP_NONE))
-			/* Not the type of binary packet we are expecting. */
-			return;
-
-		/* Ok, we have our expected binary output packet. Since there are many
-		 * ways to configure the binary data output, the burden is on the user
-		 * to correctly parse the binary packet. However, we can make use of
-		 * the parsing convenience methods provided by the Packet structure.
-		 * When using these convenience methods, you have to extract them in
-		 * the order they are organized in the binary packet per the User Manual. */
-		timeStartup = VnUartPacket_extractUint64(packet);
-		ypr = VnUartPacket_extractVec3f(packet);
-
-		str_vec3f(strConversions, ypr);
-		cnt++;
-		//printf("Binary Async TimeStartup: %" PRIu64 "\n", timeStartup);
-		printf("%d - Binary Async YPR: %s\n", cnt, strConversions);
-		
-		// -------------------------------------------------------------
-
-		//fprintf(gnuplotPipe, "plot '-' using 1:1 with lines\n"); // Specifying x and y columns
-		static float xmin = 0; // Adjust as needed
-   	    static float xmax = 100; // Adjust as needed
-   		//if(cnt==1)
-			//fprintf(gnuplotPipe, "set xrange [%f:%f]\n", xmin, xmax);	
-		
-		//fprintf(gnuplotPipe,"plot '-'\n");
-		//fprintf(gnuplotPipe, "%d %f \n", cnt, ypr.c[0]);
-        //fprintf(gnuplotPipe, "e\n");
-        //fflush(gnuplotPipe);
-
-		fprintf(temp, "%d %f %f %f \n", cnt, ypr.c[0], ypr.c[1], ypr.c[2]); 				fflush(temp);
-		fprintf(gnuplotPipe, "%s \n", commandsForGnuplot); 								fflush(gnuplotPipe);
-		//fprintf(gnuplotPipe, "%s \n", commandsForGnuplot[1]); 								fflush(gnuplotPipe);
-		//fprintf(gnuplotPipe, "%s \n", commandsForGnuplot[2]); 								fflush(gnuplotPipe);
-		fprintf(gnuplotPipe, "e\n"); 														fflush(gnuplotPipe);
-
-		//Sleep(100);
-
-		// ------------------------------------------------------------
-
-		return;
-	}
-}
-
-int processErrorReceived(char* errorMessage, VnError errorCode)
-{
-	char errorCodeStr[100];
-	strFromVnError(errorCodeStr, errorCode);
-	printf("%s\nERROR: %s\n", errorMessage, errorCodeStr);
-	return -1;
+    fprintf(stderr, "Done.\n");
+    return 0;
 }

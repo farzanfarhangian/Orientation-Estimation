@@ -3,6 +3,9 @@
  * @file ekf.h
  */
 
+#ifndef EKF_H
+#define EKF_H
+
 #include "orientationDefines.h"
 
 typedef struct
@@ -123,3 +126,5 @@ float ekf_LUDeterminant(MATRIX_f * pInput, uint16_t uiSize);
  * @brief Copy a matrix to another matrix
  */
 void ekf_LUDecomposition(MATRIX_f * pInput, MATRIX_f * pU, MATRIX_f * pL, uint16_t uiSize);
+
+#endif /* EKF_H */
