@@ -1,9 +1,10 @@
 """
-Runs Madgwick, Mahony, and EKF (6-DoF, accel-only correction) on imu_raw.csv
+Runs Madgwick, Mahony, and EKF (9-DoF: accel + GPS heading correction) on imu_raw.csv
 and exports data/results.json for the Three.js visualization.
 
-Output is downsampled to ~20 Hz to keep the JSON small (~2 MB).
+Output is downsampled to ~10 Hz to keep the JSON small.
 Ground truth (NAV-ATT) is interpolated onto the same time grid.
+GPS heading from NAV-ATT is fed into the EKF at ~5 Hz.
 """
 
 import json
@@ -161,112 +162,137 @@ def mahony_update(q, ax, ay, az, gx, gy, gz, dt, kP=0.1, kI=1.0, bias=[0,0,0]):
     q = qnorm([qw+dw*dt, qx+dx*dt, qy+dy*dt, qz+dz*dt])
     return q, bias
 
-# ── EKF 6-DoF accel-only correction (port of ekf.c, no-mag path) ─────────────
+# ── EKF matrix helpers (using numpy for clarity) ─────────────────────────────
 
-def mat_mul(A, B, ra, ca, cb):
-    C = [[0.0]*cb for _ in range(ra)]
-    for i in range(ra):
-        for j in range(cb):
-            for k in range(ca):
-                C[i][j] += A[i][k]*B[k][j]
-    return C
+class EKF9:
+    """
+    EKF with accelerometer correction every IMU step and GPS heading correction
+    whenever a new heading measurement is available (~5 Hz from NAV-ATT).
 
-def mat_add(A, B, r, c):
-    return [[A[i][j]+B[i][j] for j in range(c)] for i in range(r)]
+    State: quaternion [w, x, y, z]  (Hamilton convention)
+    Accel measurement model: normalized gravity in body frame (3-axis)
+    Heading measurement model: yaw = atan2(2*(qx*qy + qw*qz), qw²+qx²-qy²-qz²)
+    """
 
-def mat_scale(A, s, r, c):
-    return [[A[i][j]*s for j in range(c)] for i in range(r)]
-
-def mat_T(A, r, c):
-    return [[A[i][j] for i in range(r)] for j in range(c)]
-
-def mat_inv3(M):
-    a,b,c = M[0]; d,e,f = M[1]; g,h,k = M[2]
-    det = a*(e*k-f*h) - b*(d*k-f*g) + c*(d*h-e*g)
-    if abs(det) < 1e-12: return [[1 if i==j else 0 for j in range(3)] for i in range(3)]
-    inv = [
-        [(e*k-f*h)/det, -(b*k-c*h)/det,  (b*f-c*e)/det],
-        [-(d*k-f*g)/det,  (a*k-c*g)/det, -(a*f-c*d)/det],
-        [(d*h-e*g)/det, -(a*h-b*g)/det,  (a*e-b*d)/det],
-    ]
-    return inv
-
-class EKF6:
-    def __init__(self, q, gyro_var=0.01, accel_var=0.01):
-        self.q = list(q)
-        self.P = [[1 if i==j else 0 for j in range(4)] for i in range(4)]
-        self.gv = gyro_var
-        self.av = accel_var
+    def __init__(self, q, gyro_var=0.005, accel_var=0.1, heading_var=0.003):
+        self.q = np.array(q, dtype=np.float64)
+        self.q /= np.linalg.norm(self.q)
+        # Initial covariance — start tight on tilt (known from accel init),
+        # slightly looser on yaw (known from GPS init but GPS has noise)
+        self.P = np.diag([0.001, 0.001, 0.001, 0.005])
+        self.gv = gyro_var      # (rad/s)² per axis
+        self.av = accel_var     # normalized accel noise variance per axis
+        self.hv = heading_var   # (rad)² heading noise variance
 
     def predict(self, gx, gy, gz, dt):
         gx *= DEG2RAD; gy *= DEG2RAD; gz *= DEG2RAD
-        h = dt/2.0
-        qw,qx,qy,qz = self.q
-        self.q = qnorm([
+        h = dt / 2.0
+        qw, qx, qy, qz = self.q
+
+        # Quaternion kinematics: q_new = (I + h*Omega) * q
+        self.q = np.array([
             qw + h*(-gx*qx - gy*qy - gz*qz),
-            qx + h*( gx*qw - gy*qz + gz*qy),
-            qy + h*( gx*qz + gy*qw - gz*qx),
-            qz + h*(-gx*qy + gy*qx + gz*qw),
+            qx + h*( gx*qw + gz*qy - gy*qz),
+            qy + h*( gy*qw - gz*qx + gx*qz),
+            qz + h*( gz*qw + gy*qx - gx*qy),
+        ])
+        self.q /= np.linalg.norm(self.q)
+
+        # State transition Jacobian F = I + h*Omega_matrix
+        F = np.array([
+            [1,      -gx*h, -gy*h, -gz*h],
+            [gx*h,    1,     gz*h, -gy*h],
+            [gy*h,   -gz*h,  1,     gx*h],
+            [gz*h,    gy*h, -gx*h,  1   ],
         ])
 
-        F = [
-            [1,       -gx*h, -gy*h, -gz*h],
-            [gx*h,    1,      gz*h, -gy*h],
-            [gy*h,   -gz*h,   1,     gx*h],
-            [gz*h,    gy*h,  -gx*h,  1   ],
-        ]
-        qw,qx,qy,qz = self.q
-        W = [
-            [-qx*h, -qy*h, -qz*h],
-            [ qw*h, -qz*h,  qy*h],
-            [ qz*h,  qw*h, -qx*h],
-            [-qy*h,  qx*h,  qw*h],
-        ]
-        Q = mat_scale(mat_mul(W, mat_T(W,4,3), 4, 3, 4), self.gv, 4, 4)
-        FP  = mat_mul(F, self.P, 4, 4, 4)
-        FPFt= mat_mul(FP, mat_T(F,4,4), 4, 4, 4)
-        self.P = mat_add(FPFt, Q, 4, 4)
+        # Process noise: Q = h² * Xi * R_gyro * Xi^T
+        qw, qx, qy, qz = self.q
+        Xi = h * np.array([
+            [-qx, -qy, -qz],
+            [ qw, -qz,  qy],
+            [ qz,  qw, -qx],
+            [-qy,  qx,  qw],
+        ])
+        R_gyro = self.gv * np.eye(3)
+        Q = Xi @ R_gyro @ Xi.T
 
-    def correct(self, ax, ay, az):
+        self.P = F @ self.P @ F.T + Q
+
+    def correct_accel(self, ax, ay, az):
         n = math.sqrt(ax*ax + ay*ay + az*az)
-        if n == 0: return
+        if n == 0:
+            return
         ax /= n; ay /= n; az /= n
 
-        qw,qx,qy,qz = self.q
-        # predicted gravity in body frame (DCM row 3 transposed)
+        qw, qx, qy, qz = self.q
+
+        # Expected normalized gravity in body frame (third row of C_nb^T)
         hx = 2*(qx*qz - qw*qy)
         hy = 2*(qy*qz + qw*qx)
         hz = qw*qw - qx*qx - qy*qy + qz*qz
 
-        innov = [ax-hx, ay-hy, az-hz]
+        innov = np.array([ax - hx, ay - hy, az - hz])
 
-        # H = d(h)/d(q) * 2
-        H = [
-            [-qy,  qz, -qw, qx],
-            [ qx,  qw,  qz, qy],
-            [ qw, -qx, -qy, qz],
-        ]
-        H = mat_scale(H, 2.0, 3, 4)
+        # Jacobian: d[hx,hy,hz]/d[qw,qx,qy,qz]
+        H = 2.0 * np.array([
+            [-qy,  qz, -qw,  qx],
+            [ qx,  qw,  qz,  qy],
+            [ qw, -qx, -qy,  qz],
+        ])
 
-        HP  = mat_mul(H, self.P, 3, 4, 4)
-        HPHt= mat_mul(HP, mat_T(H,3,4), 3, 4, 3)
-        R   = [[self.av if i==j else 0 for j in range(3)] for i in range(3)]
-        S   = mat_add(HPHt, R, 3, 3)
-        Sinv= mat_inv3(S)
+        R = self.av * np.eye(3)
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T @ np.linalg.inv(S)
 
-        PHt = mat_mul(self.P, mat_T(H,3,4), 4, 4, 3)
-        K   = mat_mul(PHt, Sinv, 4, 3, 3)
+        self.q = self.q + K @ innov
+        self.q /= np.linalg.norm(self.q)
 
-        # update q
-        for i,name in enumerate(['q0','q1','q2','q3']):
-            self.q[i] += K[i][0]*innov[0] + K[i][1]*innov[1] + K[i][2]*innov[2]
-        self.q = qnorm(self.q)
+        # Joseph form for numerical stability
+        I_KH = np.eye(4) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
 
-        # update P
-        KH  = mat_mul(K, H, 4, 3, 4)
-        I   = [[1 if i==j else 0 for j in range(4)] for i in range(4)]
-        IKH = mat_add(I, mat_scale(KH,-1,4,4), 4, 4)
-        self.P = mat_mul(IKH, self.P, 4, 4, 4)
+    def correct_heading(self, yaw_deg):
+        """Update using GPS/NAV-ATT heading. yaw_deg in degrees."""
+        yaw_meas = yaw_deg * DEG2RAD
+        qw, qx, qy, qz = self.q
+
+        # Expected yaw from quaternion: atan2(2*(qx*qy + qw*qz), qw²+qx²-qy²-qz²)
+        num = 2.0*(qx*qy + qw*qz)
+        den = qw*qw + qx*qx - qy*qy - qz*qz
+        yaw_pred = math.atan2(num, den)
+
+        # Innovation with wrap-around
+        innov = math.atan2(math.sin(yaw_meas - yaw_pred),
+                           math.cos(yaw_meas - yaw_pred))
+
+        # Jacobian: d(yaw)/d(q)  via quotient rule on atan2(num, den)
+        d = num*num + den*den
+        if d < 1e-9:
+            return  # near-singularity (pitch ≈ ±90°), skip
+        H = np.array([[
+            2*(-qz*den - qw*num) / d,   # d/dqw
+            2*( qy*den - qx*num) / d,   # d/dqx — wait, sign check below
+            2*( qx*den + qy*num) / d,   # d/dqy
+            2*( qw*den - qz*num) / d,   # d/dqz
+        ]])
+        # Verify signs:
+        #   d(num)/dq = [2qz, 2qy, 2qx, 2qw]
+        #   d(den)/dq = [2qw, 2qx, -2qy, -2qz]
+        #   H = (den*d_num - num*d_den) / (num²+den²)
+        d_num = np.array([2*qz, 2*qy, 2*qx, 2*qw])
+        d_den = np.array([2*qw, 2*qx, -2*qy, -2*qz])
+        H = ((den * d_num - num * d_den) / d).reshape(1, 4)
+
+        R = np.array([[self.hv]])
+        S = H @ self.P @ H.T + R
+        K = self.P @ H.T / float(S[0, 0])
+
+        self.q = self.q + K.flatten() * innov
+        self.q /= np.linalg.norm(self.q)
+
+        I_KH = np.eye(4) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -276,65 +302,43 @@ def main():
     imu = pd.read_csv(IMU_CSV)
     gt  = pd.read_csv(GT_CSV)
 
-    # skip NAV-ATT init period (first 475 samples have roll=0)
+    # Keep only the window where GPS heading is valid
     gt = gt[gt['roll'] != 0.0].reset_index(drop=True)
+    T_START = float(gt['timestamp_s'].iloc[0])   # first valid GT sample (~50.4 s)
+    T_END   = T_START + 600.0                     # 10 minutes of aligned data
+
+    imu = imu[(imu['timestamp_s'] >= T_START) & (imu['timestamp_s'] <= T_END)].reset_index(drop=True)
+    gt  = gt[ (gt['timestamp_s']  >= T_START) & (gt['timestamp_s']  <= T_END) ].reset_index(drop=True)
+    print(f"Window: {T_START:.1f}s – {T_END:.1f}s  |  IMU={len(imu)} samples  GT={len(gt)} samples")
 
     # determine stride to reach TARGET_HZ
     dt_imu = float(imu['timestamp_s'].diff().median())
     stride  = max(1, round(1.0 / (TARGET_HZ * dt_imu)))
     print(f"IMU dt={dt_imu*1000:.2f}ms, stride={stride} → ~{1/(stride*dt_imu):.1f} Hz output")
 
-    # initialise filters from first sample + GT yaw at t=0
-    a0 = imu.iloc[0]
-    roll0, pitch0 = init_quat_from_accel.__wrapped__ if hasattr(init_quat_from_accel,'__wrapped__') else (None, None)
-
-    # get tilt from accel, then seed yaw from first valid GT sample
-    a0_ax, a0_ay, a0_az = a0.accel_x, a0.accel_y, a0.accel_z
-    n = math.sqrt(a0_ax**2 + a0_ay**2 + a0_az**2)
-    if n: a0_ax /= n; a0_ay /= n; a0_az /= n
-    roll0  = math.atan2(a0_ay, a0_az)
-    pitch0 = math.atan2(-a0_ax, math.sqrt(a0_ay**2 + a0_az**2))
-
     gt_ts_all  = gt['timestamp_s'].values
     gt_roll_all= gt['roll'].values
     gt_pit_all = gt['pitch'].values
     gt_yaw_all = gt['yaw'].values
 
-    # interpolate GT yaw at t=0 of IMU
-    t_start = float(imu['timestamp_s'].iloc[0])
-    gi0 = np.searchsorted(gt_ts_all, t_start)
-    if gi0 == 0:
-        yaw0_deg = float(gt_yaw_all[0])
-    elif gi0 >= len(gt_ts_all):
-        yaw0_deg = float(gt_yaw_all[-1])
-    else:
-        t0g, t1g = gt_ts_all[gi0-1], gt_ts_all[gi0]
-        alpha = (t_start - t0g) / (t1g - t0g) if t1g != t0g else 0
-        yaw0_deg = float(gt_yaw_all[gi0-1] + alpha*(gt_yaw_all[gi0]-gt_yaw_all[gi0-1]))
-
-    yaw0 = yaw0_deg * DEG2RAD
-    cr,sr = math.cos(roll0/2),  math.sin(roll0/2)
-    cp,sp = math.cos(pitch0/2), math.sin(pitch0/2)
-    cy,sy = math.cos(yaw0/2),   math.sin(yaw0/2)
-    q0 = qnorm([
-        cr*cp*cy + sr*sp*sy,
-        sr*cp*cy - cr*sp*sy,
-        cr*sp*cy + sr*cp*sy,
-        cr*cp*sy - sr*sp*cy,
-    ])
-    print(f"Init: roll={math.degrees(roll0):.2f}°  pitch={math.degrees(pitch0):.2f}°  yaw(GT)={yaw0_deg:.2f}°")
+    # Initialise all filters from the first GT sample (roll + pitch + yaw all known)
+    q0 = euler_to_quat(gt_roll_all[0], gt_pit_all[0], gt_yaw_all[0])
+    print(f"Init from GT: roll={gt_roll_all[0]:.2f}°  pitch={gt_pit_all[0]:.2f}°  yaw={gt_yaw_all[0]:.2f}°")
 
     q_madg  = list(q0)
     q_maho  = list(q0)
     bias_maho = [0.0, 0.0, 0.0]
-    ekf = EKF6(q0)
+    ekf = EKF9(q0, gyro_var=0.005, accel_var=0.1, heading_var=0.003)
 
     out_t, out_madg, out_maho, out_ekf, out_gt = [], [], [], [], []
 
     gt_ts  = gt_ts_all
-    gt_roll= gt_roll_all
-    gt_pit = gt_pit_all
-    gt_yaw = gt_yaw_all
+    gt_roll = gt_roll_all
+    gt_pit  = gt_pit_all
+    gt_yaw  = gt_yaw_all
+
+    # Track which GT sample was last used for heading correction
+    last_gt_idx = -1
 
     print(f"Running algorithms on {len(imu)} samples...")
     for idx, row in enumerate(imu.itertuples(index=False)):
@@ -347,7 +351,13 @@ def main():
         q_maho, bias_maho = mahony_update(q_maho, ax,ay,az, gx,gy,gz, dt,
                                           kP=0.5, kI=0.1, bias=bias_maho)
         ekf.predict(gx,gy,gz, dt)
-        ekf.correct(ax,ay,az)
+        ekf.correct_accel(ax,ay,az)
+
+        # Feed GPS heading into EKF whenever a new GT sample is available
+        gi = int(np.searchsorted(gt_ts, t, side='right')) - 1
+        if gi >= 0 and gi < len(gt_ts) and gi != last_gt_idx:
+            ekf.correct_heading(gt_yaw[gi])
+            last_gt_idx = gi
 
         if idx % stride == 0:
             out_t.append(round(t, 4))
