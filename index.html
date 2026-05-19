@@ -47,14 +47,15 @@
   .scrub-wrap{flex:1;min-width:120px}
   #scrub{width:100%;accent-color:#388bfd}
 
-  /* error chart */
-  .chart-section{padding:12px 16px;border-top:1px solid #21262d}
-  .chart-section h2{font-size:.78rem;color:#8b949e;margin-bottom:8px;font-weight:500}
-  .chart-wrap{position:relative;height:130px}
-  #errChart{width:100%;height:100%}
+  /* error charts */
+  .charts-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:#21262d;border-top:1px solid #21262d}
+  .chart-section{background:#0d1117;padding:10px 12px}
+  .chart-section h2{font-size:.72rem;color:#8b949e;margin-bottom:6px;font-weight:500;text-align:center}
+  .chart-wrap{position:relative;height:110px}
+  .chart-wrap canvas{width:100%;height:100%}
 
   /* legend */
-  .legend{display:flex;gap:14px;padding:6px 16px 10px;flex-wrap:wrap}
+  .legend{display:flex;gap:14px;padding:6px 16px 10px;flex-wrap:wrap;border-top:1px solid #21262d}
   .leg-item{display:flex;align-items:center;gap:5px;font-size:.72rem;color:#8b949e}
   .leg-dot{width:10px;height:10px;border-radius:50%}
 
@@ -124,15 +125,24 @@
     <span class="time-display" id="timeDisp">0:00 / 0:00</span>
   </div>
 
-  <div class="chart-section">
-    <h2>Absolute orientation error vs. NAV-ATT ground truth (roll+pitch combined RMS, deg)</h2>
-    <div class="chart-wrap"><canvas id="errChart"></canvas></div>
+  <div class="charts-grid">
+    <div class="chart-section">
+      <h2>Roll error vs. NAV-ATT (deg)</h2>
+      <div class="chart-wrap"><canvas id="chartRoll"></canvas></div>
+    </div>
+    <div class="chart-section">
+      <h2>Pitch error vs. NAV-ATT (deg)</h2>
+      <div class="chart-wrap"><canvas id="chartPitch"></canvas></div>
+    </div>
+    <div class="chart-section">
+      <h2>Yaw error vs. NAV-ATT (deg)</h2>
+      <div class="chart-wrap"><canvas id="chartYaw"></canvas></div>
+    </div>
   </div>
   <div class="legend">
     <div class="leg-item"><div class="leg-dot" style="background:#58a6ff"></div>Madgwick</div>
     <div class="leg-item"><div class="leg-dot" style="background:#3fb950"></div>Mahony</div>
     <div class="leg-item"><div class="leg-dot" style="background:#d2a8ff"></div>EKF</div>
-    <div class="leg-item"><div class="leg-dot" style="background:#e3b341;border-radius:0;width:16px;height:3px"></div>Ground truth (NAV-ATT)</div>
   </div>
 </div>
 
@@ -264,73 +274,98 @@ function eulerToQuat(roll, pitch, yaw) {
   return tq;
 }
 
-// ── error chart ──────────────────────────────────────────────────────────────
-const chartCanvas = document.getElementById('errChart');
-const ctx = chartCanvas.getContext('2d');
+// ── error charts ─────────────────────────────────────────────────────────────
+function angDiff(a,b){ return (a-b+540)%360-180; }
 
-function angDiff(a,b){ let d=(a-b+540)%360-180; return d; }
-
-// precompute per-frame tilt error for each algorithm (roll+pitch RMS)
-function computeErrors(algKey) {
+// precompute per-axis errors for each algorithm
+function computeAxisErrors(algKey, axis) {
   const euler = data[algKey].euler;
   const gt    = data.gt.euler;
-  return euler.map((e,i)=>{
-    const dr = angDiff(e[0], gt[i][0]);
-    const dp = angDiff(e[1], gt[i][1]);
-    return Math.sqrt((dr*dr+dp*dp)/2);
-  });
+  return euler.map((e,i) => angDiff(e[axis], gt[i][axis]));
 }
-const errors = algKeys.map(k=>computeErrors(k));
 
-// running RMSE
+const axisErrors = [0,1,2].map(axis =>
+  algKeys.map(k => computeAxisErrors(k, axis))
+);
+// axisErrors[axis][algIdx][frame]
+
+// RMSE per algorithm = combined roll+pitch only (yaw unreliable without mag)
 function rmse(arr){ return Math.sqrt(arr.reduce((s,v)=>s+v*v,0)/arr.length).toFixed(2); }
-algKeys.forEach((_,i)=>document.getElementById(`rmse${i}`).textContent = rmse(errors[i])+'°');
+algKeys.forEach((_,ai)=>{
+  const rErr = axisErrors[0][ai], pErr = axisErrors[1][ai];
+  const combined = rErr.map((r,i)=>Math.sqrt((r*r+pErr[i]*pErr[i])/2));
+  document.getElementById(`rmse${ai}`).textContent = rmse(combined)+'°';
+});
 
-// downsample chart to max 800 points
-const CHART_PTS = Math.min(800, N);
+// downsample to max 600 points per chart
+const CHART_PTS = Math.min(600, N);
 const chartStride = Math.max(1, Math.floor(N/CHART_PTS));
 const chartT = data.t.filter((_,i)=>i%chartStride===0);
-const chartErr = errors.map(e=>e.filter((_,i)=>i%chartStride===0));
+const chartAxisErrors = [0,1,2].map(axis =>
+  algKeys.map((_,ai) => axisErrors[axis][ai].filter((_,i)=>i%chartStride===0))
+);
 
-function drawChart(frameIdx) {
-  const W = chartCanvas.clientWidth, H = chartCanvas.clientHeight;
-  chartCanvas.width  = W * devicePixelRatio;
-  chartCanvas.height = H * devicePixelRatio;
-  ctx.scale(devicePixelRatio, devicePixelRatio);
+const chartCanvases = [
+  document.getElementById('chartRoll'),
+  document.getElementById('chartPitch'),
+  document.getElementById('chartYaw'),
+];
+const chartCtxs = chartCanvases.map(c=>c.getContext('2d'));
+const axisLabels = ['Roll','Pitch','Yaw'];
 
-  ctx.clearRect(0,0,W,H);
-  const pad={l:32,r:8,t:6,b:18};
-  const cw = W-pad.l-pad.r, ch = H-pad.t-pad.b;
+function drawAxisChart(axis, frameIdx) {
+  const canvas = chartCanvases[axis];
+  const ctx2   = chartCtxs[axis];
+  const errs   = chartAxisErrors[axis];
 
-  const allVals = chartErr.flat();
-  const maxV = Math.min(90, Math.max(...allVals)*1.1 || 10);
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width  = W * devicePixelRatio;
+  canvas.height = H * devicePixelRatio;
+  ctx2.scale(devicePixelRatio, devicePixelRatio);
+  ctx2.clearRect(0,0,W,H);
 
-  function tx(i){ return pad.l + (i/(chartT.length-1))*cw; }
-  function ty(v){ return pad.t + ch - (v/maxV)*ch; }
+  const pad={l:30,r:6,t:4,b:16};
+  const cw=W-pad.l-pad.r, ch=H-pad.t-pad.b;
 
-  // grid lines
-  ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
-  [0,0.25,0.5,0.75,1].forEach(f=>{
-    const y=pad.t+ch*(1-f);
-    ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(pad.l+cw,y); ctx.stroke();
-    ctx.fillStyle='#8b949e'; ctx.font=`${10*devicePixelRatio/devicePixelRatio}px sans-serif`;
-    ctx.fillText((maxV*f).toFixed(1)+'°', 0, y+4);
+  const allVals = errs.flat().map(Math.abs);
+  const maxV = Math.min(axis===2?180:30, Math.max(...allVals)*1.15 || 10);
+  const minV = axis===2 ? -maxV : -maxV;
+
+  function tx(i){ return pad.l+(i/(chartT.length-1))*cw; }
+  function ty(v){ return pad.t + ch*(1-(v-minV)/(maxV-minV)); }
+
+  // zero line
+  ctx2.strokeStyle='#30363d'; ctx2.lineWidth=1;
+  ctx2.beginPath(); ctx2.moveTo(pad.l,ty(0)); ctx2.lineTo(pad.l+cw,ty(0)); ctx2.stroke();
+
+  // grid
+  const steps = axis===2 ? [-90,0,90] : [-10,-5,0,5,10];
+  steps.forEach(v=>{
+    if(v < minV || v > maxV) return;
+    const y=ty(v);
+    ctx2.strokeStyle='#21262d'; ctx2.lineWidth=0.5;
+    ctx2.beginPath(); ctx2.moveTo(pad.l,y); ctx2.lineTo(pad.l+cw,y); ctx2.stroke();
+    ctx2.fillStyle='#8b949e'; ctx2.font='9px sans-serif';
+    ctx2.fillText(v+'°', 0, y+3);
   });
 
-  // error lines
-  chartErr.forEach((errs,ai)=>{
-    ctx.beginPath();
-    ctx.strokeStyle=cssColors[ai]; ctx.lineWidth=1.5; ctx.globalAlpha=0.85;
-    errs.forEach((v,i)=>i===0?ctx.moveTo(tx(i),ty(v)):ctx.lineTo(tx(i),ty(v)));
-    ctx.stroke();
+  // error lines per algorithm
+  errs.forEach((vals,ai)=>{
+    ctx2.beginPath();
+    ctx2.strokeStyle=cssColors[ai]; ctx2.lineWidth=1.4; ctx2.globalAlpha=0.85;
+    vals.forEach((v,i)=>i===0?ctx2.moveTo(tx(i),ty(v)):ctx2.lineTo(tx(i),ty(v)));
+    ctx2.stroke();
   });
-  ctx.globalAlpha=1;
+  ctx2.globalAlpha=1;
 
   // playhead
-  const ci = Math.round(frameIdx/chartStride);
-  const px = tx(Math.min(ci, chartT.length-1));
-  ctx.strokeStyle='#ffffff44'; ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.moveTo(px,pad.t); ctx.lineTo(px,pad.t+ch); ctx.stroke();
+  const ci = Math.min(Math.round(frameIdx/chartStride), chartT.length-1);
+  ctx2.strokeStyle='#ffffff55'; ctx2.lineWidth=1.5;
+  ctx2.beginPath(); ctx2.moveTo(tx(ci),pad.t); ctx2.lineTo(tx(ci),pad.t+ch); ctx2.stroke();
+}
+
+function drawCharts(frameIdx) {
+  [0,1,2].forEach(axis => drawAxisChart(axis, frameIdx));
 }
 
 // ── angle display ─────────────────────────────────────────────────────────────
@@ -366,7 +401,7 @@ function setFrame(idx) {
   });
   scrubEl.value = Math.round(frameIdx/N*1000);
   timeEl.textContent = fmtTime(data.t[frameIdx])+' / '+fmtTime(totalDur);
-  drawChart(frameIdx);
+  drawCharts(frameIdx);
 }
 
 function tick(ts) {
