@@ -153,7 +153,7 @@
 import * as THREE from 'three';
 
 // ── load data ────────────────────────────────────────────────────────────────
-const res  = await fetch('data/results.json');
+const res  = await fetch('data/results.json?v=3');
 const data = await res.json();
 
 document.getElementById('loading').style.display = 'none';
