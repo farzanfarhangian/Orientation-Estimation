@@ -253,25 +253,17 @@ const views = [
   makeScene('c2', colors[2]),
 ];
 
-// ── quaternion → THREE.Quaternion ────────────────────────────────────────────
-// Our quats are [w,x,y,z]; gyro in deg/s body frame; Z-up NED convention
-// Three.js uses right-hand Y-up.  Simple mapping: swap axes so the box
-// visually leans in the right direction.
-function applyQuat(mesh, q) {
-  // q = [w, x, y, z]  (our convention)
-  mesh.quaternion.set(q[1], q[2], q[3], q[0]); // THREE: (x,y,z,w)
-}
-
-function eulerToQuat(roll, pitch, yaw) {
-  // degrees to Three.js Euler then quaternion
+// ── euler → THREE mesh orientation ───────────────────────────────────────────
+// Sensor frame: Z-up NED, Euler order ZYX (yaw→pitch→roll).
+// THREE.js: Y-up right-hand.  Mapping: pitch→X, yaw→Y, roll→Z, order XYZ.
+function setMeshFromEuler(mesh, roll_deg, pitch_deg, yaw_deg) {
   const e = new THREE.Euler(
-    THREE.MathUtils.degToRad(roll),
-    THREE.MathUtils.degToRad(yaw),
-    THREE.MathUtils.degToRad(pitch),
+    THREE.MathUtils.degToRad(pitch_deg),
+    THREE.MathUtils.degToRad(yaw_deg),
+    THREE.MathUtils.degToRad(roll_deg),
     'XYZ'
   );
-  const tq = new THREE.Quaternion().setFromEuler(e);
-  return tq;
+  mesh.quaternion.setFromEuler(e);
 }
 
 // ── error charts ─────────────────────────────────────────────────────────────
@@ -392,12 +384,11 @@ const totalDur = data.meta.duration_s;
 function setFrame(idx) {
   frameIdx = Math.max(0, Math.min(N-1, idx));
   algKeys.forEach((k,ai)=>{
-    const q = data[k].q[frameIdx];
-    applyQuat(views[ai].mesh, q);
+    const euler = data[k].euler[frameIdx];
+    setMeshFromEuler(views[ai].mesh, euler[0], euler[1], euler[2]);
     const gtEuler = data.gt.euler[frameIdx];
-    const tq = eulerToQuat(gtEuler[0], gtEuler[1], gtEuler[2]);
-    views[ai].meshGT.quaternion.copy(tq);
-    updateAngles(ai, data[k].euler[frameIdx]);
+    setMeshFromEuler(views[ai].meshGT, gtEuler[0], gtEuler[1], gtEuler[2]);
+    updateAngles(ai, euler);
   });
   scrubEl.value = Math.round(frameIdx/N*1000);
   timeEl.textContent = fmtTime(data.t[frameIdx])+' / '+fmtTime(totalDur);
