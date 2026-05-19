@@ -29,8 +29,8 @@
 #define MAHONY_BETA     0.0f
 #define MAHONY_KP       0.5f
 #define MAHONY_KI       0.1f
-#define EKF_GYRO_VAR    0.0001f /* sigma_gyro=0.01 rad/s → variance=0.01² */
-#define EKF_ACCEL_VAR   0.01f  /* tight accel noise for x/y tilt axes */
+#define EKF_GYRO_VAR    0.01f  /* sigma_gyro=0.1 rad/s → variance=0.1²; tuned for this dataset */
+#define EKF_ACCEL_VAR   0.001f /* sigma_accel=0.0316 m/s²; tight trust in accel measurement */
 #define EKF_MAG_VAR     1e6f   /* large → effectively disables magnetometer */
 #define EKF_DIP         0.0f
 
