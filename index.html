@@ -153,7 +153,7 @@
 import * as THREE from 'three';
 
 // ── load data ────────────────────────────────────────────────────────────────
-const res  = await fetch('data/results.json?v=4');
+const res  = await fetch('data/results.json?v=5');
 const data = await res.json();
 
 document.getElementById('loading').style.display = 'none';
@@ -253,17 +253,31 @@ const views = [
   makeScene('c2', colors[2]),
 ];
 
-// ── euler → THREE mesh orientation ───────────────────────────────────────────
-// Sensor frame: Z-up NED, Euler order ZYX (yaw→pitch→roll).
-// THREE.js: Y-up right-hand.  Mapping: pitch→X, yaw→Y, roll→Z, order XYZ.
-function setMeshFromEuler(mesh, roll_deg, pitch_deg, yaw_deg) {
-  const e = new THREE.Euler(
-    THREE.MathUtils.degToRad(pitch_deg),
-    THREE.MathUtils.degToRad(yaw_deg),
-    THREE.MathUtils.degToRad(roll_deg),
-    'XYZ'
-  );
-  mesh.quaternion.setFromEuler(e);
+// ── orientation helpers ───────────────────────────────────────────────────────
+// Algorithm boxes: set directly from the Hamilton quaternion [w,x,y,z] produced
+// by the C code (body→NED, ZYX convention).  We remap axes so the box looks
+// right in THREE.js's Y-up right-hand world:
+//   NED X (forward) → THREE +X
+//   NED Y (right)   → THREE -Z
+//   NED Z (down)    → THREE -Y
+function setMeshFromQuat(mesh, w, x, y, z) {
+  // Permute: q_three = q_ned with axes (x→x, y→-z, z→-y)
+  // Equivalent rotation: swap Y/Z and negate both
+  mesh.quaternion.set(x, -z, -y, w);
+}
+
+// GT box: built from ZYX Euler angles (roll, pitch, yaw in degrees) from CSV.
+// Convert to quaternion using standard ZYX formula then apply same axis remap.
+function setMeshFromZYXEuler(mesh, roll_deg, pitch_deg, yaw_deg) {
+  const r = THREE.MathUtils.degToRad(roll_deg)  * 0.5;
+  const p = THREE.MathUtils.degToRad(pitch_deg) * 0.5;
+  const y = THREE.MathUtils.degToRad(yaw_deg)   * 0.5;
+  const cr=Math.cos(r),sr=Math.sin(r),cp=Math.cos(p),sp=Math.sin(p),cy=Math.cos(y),sy=Math.sin(y);
+  const w =  cr*cp*cy + sr*sp*sy;
+  const qx = sr*cp*cy - cr*sp*sy;
+  const qy = cr*sp*cy + sr*cp*sy;
+  const qz = cr*cp*sy - sr*sp*cy;
+  setMeshFromQuat(mesh, w, qx, qy, qz);
 }
 
 // ── error charts ─────────────────────────────────────────────────────────────
@@ -384,11 +398,11 @@ const totalDur = data.meta.duration_s;
 function setFrame(idx) {
   frameIdx = Math.max(0, Math.min(N-1, idx));
   algKeys.forEach((k,ai)=>{
-    const euler = data[k].euler[frameIdx];
-    setMeshFromEuler(views[ai].mesh, euler[0], euler[1], euler[2]);
-    const gtEuler = data.gt.euler[frameIdx];
-    setMeshFromEuler(views[ai].meshGT, gtEuler[0], gtEuler[1], gtEuler[2]);
-    updateAngles(ai, euler);
+    const q = data[k].q[frameIdx];           // [w,x,y,z] from C code
+    setMeshFromQuat(views[ai].mesh, q[0], q[1], q[2], q[3]);
+    const gtEuler = data.gt.euler[frameIdx]; // [roll,pitch,yaw] from CSV (ZYX)
+    setMeshFromZYXEuler(views[ai].meshGT, gtEuler[0], gtEuler[1], gtEuler[2]);
+    updateAngles(ai, data[k].euler[frameIdx]);
   });
   scrubEl.value = Math.round(frameIdx/N*1000);
   timeEl.textContent = fmtTime(data.t[frameIdx])+' / '+fmtTime(totalDur);
