@@ -29,8 +29,8 @@
 #define MAHONY_BETA     0.0f
 #define MAHONY_KP       0.5f
 #define MAHONY_KI       0.1f
-#define EKF_GYRO_VAR    0.005f
-#define EKF_ACCEL_VAR   0.1f
+#define EKF_GYRO_VAR    0.0001f /* sigma_gyro=0.01 rad/s → variance=0.01² */
+#define EKF_ACCEL_VAR   0.01f  /* tight accel noise for x/y tilt axes */
 #define EKF_MAG_VAR     1e6f   /* large → effectively disables magnetometer */
 #define EKF_DIP         0.0f
 
@@ -182,6 +182,11 @@ int main(void)
     ekf_Init(&ekf, &init_heading_deg, &init_accel,
              EKF_GYRO_VAR, EKF_ACCEL_VAR, EKF_MAG_VAR, EKF_DIP);
     ekf.qEkfQuat = q_init;
+    /* Tight initial covariance — trust the GT initialisation (mirrors attitude.py P0) */
+    ekf.vCovarianceP.dROW1 = (QUATERNION){0.001f, 0.0f, 0.0f, 0.0f};
+    ekf.vCovarianceP.dROW2 = (QUATERNION){0.0f, 0.001f, 0.0f, 0.0f};
+    ekf.vCovarianceP.dROW3 = (QUATERNION){0.0f, 0.0f, 0.001f, 0.0f};
+    ekf.vCovarianceP.dROW4 = (QUATERNION){0.0f, 0.0f, 0.0f, 0.001f};
 
     /* zero-magnitude mag → ekf_Update will call ekf_Correction_No_Mag */
     VECTOR_3D zero_mag = {0.0f, 0.0f, 0.0f};
