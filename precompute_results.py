@@ -46,6 +46,21 @@ def quat_to_euler(q):
     yaw   = RAD2DEG * math.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z))
     return roll, pitch, yaw
 
+def euler_to_quat(roll_deg, pitch_deg, yaw_deg):
+    """Convert roll/pitch/yaw (degrees) to quaternion [w,x,y,z]."""
+    r = roll_deg  * DEG2RAD
+    p = pitch_deg * DEG2RAD
+    y = yaw_deg   * DEG2RAD
+    cr,sr = math.cos(r/2), math.sin(r/2)
+    cp,sp = math.cos(p/2), math.sin(p/2)
+    cy,sy = math.cos(y/2), math.sin(y/2)
+    return qnorm([
+        cr*cp*cy + sr*sp*sy,
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy,
+    ])
+
 def init_quat_from_accel(ax, ay, az):
     """Rough tilt-only initialisation from a single accelerometer reading."""
     n = math.sqrt(ax*ax + ay*ay + az*az)
@@ -269,9 +284,45 @@ def main():
     stride  = max(1, round(1.0 / (TARGET_HZ * dt_imu)))
     print(f"IMU dt={dt_imu*1000:.2f}ms, stride={stride} → ~{1/(stride*dt_imu):.1f} Hz output")
 
-    # initialise filters from first sample
+    # initialise filters from first sample + GT yaw at t=0
     a0 = imu.iloc[0]
-    q0 = init_quat_from_accel(a0.accel_x, a0.accel_y, a0.accel_z)
+    roll0, pitch0 = init_quat_from_accel.__wrapped__ if hasattr(init_quat_from_accel,'__wrapped__') else (None, None)
+
+    # get tilt from accel, then seed yaw from first valid GT sample
+    a0_ax, a0_ay, a0_az = a0.accel_x, a0.accel_y, a0.accel_z
+    n = math.sqrt(a0_ax**2 + a0_ay**2 + a0_az**2)
+    if n: a0_ax /= n; a0_ay /= n; a0_az /= n
+    roll0  = math.atan2(a0_ay, a0_az)
+    pitch0 = math.atan2(-a0_ax, math.sqrt(a0_ay**2 + a0_az**2))
+
+    gt_ts_all  = gt['timestamp_s'].values
+    gt_roll_all= gt['roll'].values
+    gt_pit_all = gt['pitch'].values
+    gt_yaw_all = gt['yaw'].values
+
+    # interpolate GT yaw at t=0 of IMU
+    t_start = float(imu['timestamp_s'].iloc[0])
+    gi0 = np.searchsorted(gt_ts_all, t_start)
+    if gi0 == 0:
+        yaw0_deg = float(gt_yaw_all[0])
+    elif gi0 >= len(gt_ts_all):
+        yaw0_deg = float(gt_yaw_all[-1])
+    else:
+        t0g, t1g = gt_ts_all[gi0-1], gt_ts_all[gi0]
+        alpha = (t_start - t0g) / (t1g - t0g) if t1g != t0g else 0
+        yaw0_deg = float(gt_yaw_all[gi0-1] + alpha*(gt_yaw_all[gi0]-gt_yaw_all[gi0-1]))
+
+    yaw0 = yaw0_deg * DEG2RAD
+    cr,sr = math.cos(roll0/2),  math.sin(roll0/2)
+    cp,sp = math.cos(pitch0/2), math.sin(pitch0/2)
+    cy,sy = math.cos(yaw0/2),   math.sin(yaw0/2)
+    q0 = qnorm([
+        cr*cp*cy + sr*sp*sy,
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy,
+    ])
+    print(f"Init: roll={math.degrees(roll0):.2f}°  pitch={math.degrees(pitch0):.2f}°  yaw(GT)={yaw0_deg:.2f}°")
 
     q_madg  = list(q0)
     q_maho  = list(q0)
@@ -280,10 +331,10 @@ def main():
 
     out_t, out_madg, out_maho, out_ekf, out_gt = [], [], [], [], []
 
-    gt_ts  = gt['timestamp_s'].values
-    gt_roll= gt['roll'].values
-    gt_pit = gt['pitch'].values
-    gt_yaw = gt['yaw'].values
+    gt_ts  = gt_ts_all
+    gt_roll= gt_roll_all
+    gt_pit = gt_pit_all
+    gt_yaw = gt_yaw_all
 
     print(f"Running algorithms on {len(imu)} samples...")
     for idx, row in enumerate(imu.itertuples(index=False)):
