@@ -97,7 +97,7 @@ void ekf_Prediction(EKF_DATA_FRAME * pDataFrame, const VECTOR_3D * pvDeviceGyro,
 
 	ekf_TransposeMatrix(&dW, &dW_Transpose);
 	ekf_MultiplyTwoMatrix(&dW, &dW_Transpose, &dQ);
-	ekf_MultiplyScalarToMatrix(&dQ, (pDataFrame->dGyroSigma2) * dTemp, &dQ);
+	ekf_MultiplyScalarToMatrix(&dQ, pDataFrame->dGyroSigma2, &dQ);
 
 	// 4. Calculate the P primary matrix
 	// P = FPF' + Q
@@ -497,21 +497,37 @@ void ekf_Correction_No_Mag(
 	mathTransform_NormalizeQuat(&pDataFrame->qEkfQuat, &pDataFrame->qEkfQuat);
 
 
-	// 8. Update the covariance matrix   P = (I-KH)P
-	MATRIX_f dTempMatrix_4x4, dI;
+	// 8. Update the covariance matrix — Joseph form: P = (I-KH)P(I-KH)' + KRK'
+	MATRIX_f dTempMatrix_4x4, dI, dIKH, dIKH_T, dKR, dKR_KT;
 	ekf_AllocateMatrix(&dTempMatrix_4x4, 4, 4);
-	ekf_AllocateMatrix(&dI, 4, 4);
+	ekf_AllocateMatrix(&dI,     4, 4);
+	ekf_AllocateMatrix(&dIKH,   4, 4);
+	ekf_AllocateMatrix(&dIKH_T, 4, 4);
+	ekf_AllocateMatrix(&dKR,    4, 3);
+	ekf_AllocateMatrix(&dKR_KT, 4, 4);
 
-	ekf_MultiplyTwoMatrix(&dK, &dH, &dTempMatrix_4x4);
-	ekf_MultiplyScalarToMatrix(&dTempMatrix_4x4, -1.0f, &dTempMatrix_4x4);     //-KH
-
+	// Build I - KH
+	ekf_MultiplyTwoMatrix(&dK, &dH, &dTempMatrix_4x4);              // KH
+	ekf_MultiplyScalarToMatrix(&dTempMatrix_4x4, -1.0f, &dTempMatrix_4x4); // -KH
 	dI.matrix[0][0] = 1.0f;
 	dI.matrix[1][1] = 1.0f;
 	dI.matrix[2][2] = 1.0f;
 	dI.matrix[3][3] = 1.0f;
+	ekf_AddTwoMatrix(&dI, &dTempMatrix_4x4, &dIKH);                 // I - KH
 
-	ekf_AddTwoMatrix(&dI, &dTempMatrix_4x4, &dTempMatrix_4x4);     //I-KH
-	ekf_MultiplyTwoMatrix(&dTempMatrix_4x4, &dP, &dP);
+	// (I-KH) P (I-KH)'
+	ekf_TransposeMatrix(&dIKH, &dIKH_T);
+	ekf_MultiplyTwoMatrix(&dIKH, &dP, &dTempMatrix_4x4);            // (I-KH)P
+	ekf_MultiplyTwoMatrix(&dTempMatrix_4x4, &dIKH_T, &dP);          // (I-KH)P(I-KH)'
+
+	// K R K'
+	ekf_MultiplyTwoMatrix(&dK, &dR, &dKR);                          // KR
+	MATRIX_f dK_T;
+	ekf_AllocateMatrix(&dK_T, 3, 4);
+	ekf_TransposeMatrix(&dK, &dK_T);
+	ekf_MultiplyTwoMatrix(&dKR, &dK_T, &dKR_KT);                    // KRK'
+
+	ekf_AddTwoMatrix(&dP, &dKR_KT, &dP);                            // (I-KH)P(I-KH)' + KRK'
 
 	pDataFrame->vCovarianceP.dROW1.dW = dP.matrix[0][0];
 	pDataFrame->vCovarianceP.dROW1.dX = dP.matrix[0][1];
